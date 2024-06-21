@@ -6,13 +6,26 @@ import static android.os.Build.VERSION.SDK_INT;
 import static android.view.InputDevice.KEYBOARD_TYPE_ALPHABETIC;
 import static android.view.KeyEvent.*;
 import static android.view.WindowManager.LayoutParams.*;
-import static com.fde.fusionwindowmanager.Util.LINUX_WINDOW_ATTRIBUTE;
-import static com.termux.x11.CmdEntryPoint.ACTION_START;
+import static com.termux.x11.XWindowService.ACTION_X_WINDOW_ATTRIBUTE;
+import static com.termux.x11.XWindowService.ACTION_X_WINDOW_PROPERTY;
+import static com.termux.x11.XWindowService.DESTROY_ACTIVITY_FROM_X;
+import static com.termux.x11.XWindowService.MODALED_ACTION_ACTIVITY_FROM_X;
+import static com.termux.x11.XWindowService.START_ACTIVITY_FROM_X;
+import static com.termux.x11.XWindowService.STOP_WINDOW_FROM_X;
+import static com.termux.x11.XWindowService.UNMODALED_ACTION_ACTIVITY_FROM_X;
+import static com.termux.x11.XWindowService.X_WINDOW_ATTRIBUTE;
+import static com.termux.x11.XWindowService.X_WINDOW_PROPERTY;
+import static com.termux.x11.Xserver.ACTION_START;
 import static com.termux.x11.LoriePreferences.ACTION_PREFERENCES_CHANGED;
+import static com.termux.x11.Xserver.ACTION_UPDATE_ICON;
+import static com.termux.x11.data.Constants.APP_TITLE_PREFIX;
+import static com.termux.x11.utils.Util.showXserverConnectSuccess;
+import static com.termux.x11.utils.Util.showXserverDisconnect;
+import static com.termux.x11.utils.Util.showXserverStartSuccess;
 
-import android.Manifest;
 import android.annotation.SuppressLint;
 import android.app.Activity;
+import android.app.ActivityManager;
 import android.app.ActivityOptions;
 import android.app.AppOpsManager;
 import android.app.Notification;
@@ -21,12 +34,15 @@ import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.content.BroadcastReceiver;
 import android.content.ClipData;
+import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.ServiceConnection;
 import android.content.SharedPreferences;
 import android.content.pm.ActivityInfo;
 import android.content.res.Configuration;
+import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Rect;
@@ -41,58 +57,78 @@ import android.os.RemoteException;
 import android.os.SystemClock;
 import android.preference.PreferenceManager;
 import android.provider.Settings;
-import android.service.notification.StatusBarNotification;
+import android.text.TextUtils;
+import android.text.style.SuggestionSpan;
 import android.util.Log;
 import android.view.DragEvent;
+import android.view.Gravity;
 import android.view.InputDevice;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
+import android.view.PointerIcon;
 import android.view.View;
 import android.view.ViewConfiguration;
 import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowInsets;
+import android.view.WindowManager;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.Button;
 import android.widget.FrameLayout;
 import android.widget.ImageButton;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
+import android.widget.Toast;
 
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.NotificationCompat;
+import androidx.core.content.ContextCompat;
 import androidx.core.math.MathUtils;
 import androidx.viewpager.widget.ViewPager;
 
+import com.easy.view.dialog.EasyDialog;
+import com.easy.view.utils.EasyUtils;
+import com.fde.fusionwindowmanager.Property;
 import com.fde.fusionwindowmanager.WindowAttribute;
+import com.termux.x11.input.DetectEventEditText;
 import com.termux.x11.input.InputEventSender;
 import com.termux.x11.input.InputStub;
 import com.termux.x11.input.TouchInputHandler.RenderStub;
 import com.termux.x11.input.TouchInputHandler;
+import com.termux.x11.utils.AppUtils;
 import com.termux.x11.utils.FullscreenWorkaround;
 import com.termux.x11.utils.KeyInterceptor;
+import com.termux.x11.utils.Reflector;
 import com.termux.x11.utils.SamsungDexUtils;
 import com.termux.x11.utils.TermuxX11ExtraKeys;
 import com.termux.x11.utils.Util;
 import com.termux.x11.utils.X11ToolbarViewPager;
 
-import java.io.File;
-import java.io.IOException;
+import java.lang.reflect.Method;
+import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Timer;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 @SuppressLint("ApplySharedPref")
 @SuppressWarnings({"deprecation", "unused"})
-public class MainActivity extends AppCompatActivity implements View.OnApplyWindowInsetsListener {
+public class MainActivity extends Activity implements View.OnApplyWindowInsetsListener {
     static final String ACTION_STOP = "com.termux.x11.ACTION_STOP";
     static final String REQUEST_LAUNCH_EXTERNAL_DISPLAY = "request_launch_external_display";
-    public static final float DECORCATIONVIEW_HEIGHT = 42;
+    private float mDecorCaptionViewHeight = 42;
 
     public static Handler handler = new Handler();
     FrameLayout frm;
+
+    public DetectEventEditText detectEventEditText;
     private TouchInputHandler mInputHandler;
-    private ICmdEntryInterface service = null;
+    public ICmdEntryInterface service;
+
     public TermuxX11ExtraKeys mExtraKeys;
     private Notification mNotification;
     private final int mNotificationId = 7892;
@@ -101,80 +137,105 @@ public class MainActivity extends AppCompatActivity implements View.OnApplyWindo
     private View.OnKeyListener mLorieKeyListener;
     private boolean filterOutWinKey = false;
     private static final int KEY_BACK = 158;
+    private EasyDialog.Builder builder;
+    private EasyDialog easyDialog;
+    private static final String TAG = MainActivity.class.getSimpleName();
 
-    private String TAG = "Xevent_MainActivity";
-
+    private boolean correctMarked = false;
     protected long WindowCode = 0;
     protected int mIndex = 0;
-    protected WindowAttribute mAttribute;
+    public WindowAttribute mAttribute;
+    public Property mProperty;
+    protected Rect mWindowRect = new Rect();
+    ActivityManager am;
+    private String title;
+    private Configuration mConfiguration;
+
 
     protected long getWindowId() {
         return WindowCode;
     }
 
-    private IReceive.Stub listener = new IReceive.Stub() {
-        @Override
-        public void startWindow(int offsetX, int offsetY, int width, int height, int index, long windowPtr) throws RemoteException {
-            Log.d(TAG, "startWindow() called with: offsetX = [" + offsetX + "], offsetY = [" + offsetY + "], width = [" + width + "], height = [" + height + "], index = [" + index + "], mIndex = [" + mIndex + "]");
-            if(index  == mIndex){
-                mAttribute.setOffsetX(offsetX);
-                mAttribute.setOffsetY(offsetY);
-            } else if(index == 1){
-                offsetY += DECORCATIONVIEW_HEIGHT;
-                ActivityOptions options = ActivityOptions.makeBasic();
-                options.setLaunchBounds(new Rect(offsetX, (int)(offsetY - DECORCATIONVIEW_HEIGHT), width + offsetX, height + offsetY));
-                Intent intent = new Intent(MainActivity.this, MainActivity1.class);
-                intent.putExtra("index", index);
-                intent.putExtra("KEY_WindowPtr", windowPtr);
-                WindowAttribute mAttribute = new WindowAttribute(offsetX, offsetY, width, height,
-                        index, windowPtr);
-                intent.putExtra("NativeWindow_data", mAttribute);
-                intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                startActivity(intent, options.toBundle());
-            } else if(index == 2 ){
-                ActivityOptions options = ActivityOptions.makeBasic();
-                options.setLaunchBounds(new Rect(offsetX, (int)(offsetY - DECORCATIONVIEW_HEIGHT), width + offsetX, height + offsetY));
-                Intent intent = new Intent(MainActivity.this, MainActivity2.class);
-                intent.putExtra("index", index);
-                intent.putExtra("KEY_WindowPtr", windowPtr);
-                WindowAttribute coordinate = new WindowAttribute(offsetX, offsetY, width, height,
-                        index, windowPtr);
-                Log.d(TAG, "coordinate:" + coordinate);
-                intent.putExtra("NativeWindow_data", coordinate);
-                intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                startActivity(intent, options.toBundle());
-            }
-        }
-    };
 
+    private boolean killSelf;
     private final BroadcastReceiver receiver = new BroadcastReceiver() {
         @SuppressLint("UnspecifiedRegisterReceiverFlag")
         @Override
         public void onReceive(Context context, Intent intent) {
-            if (ACTION_START.equals(intent.getAction())) {
+            if (ACTION_START.equals(intent.getAction()) && service != null &&!mClientConnected) {
                 try {
-                    Log.v("MainActivity", "Got new ACTION_START intent");
-                    IBinder b = Objects.requireNonNull(intent.getBundleExtra("")).getBinder("");
-                    service = ICmdEntryInterface.Stub.asInterface(b);
-                    service.registerListener(mIndex, listener);
                     Objects.requireNonNull(service).asBinder().linkToDeath(() -> {
                         service = null;
-                        CmdEntryPoint.requestConnection();
-
-                        Log.v("MainActivity", "Disconnected");
+                        Xserver.requestConnection();
+                        Log.v(TAG, "Disconnected");
                         runOnUiThread(() -> clientConnectedStateChanged(false)); //recreate()); //onPreferencesChanged(""));
                     }, 0);
-
                     onReceiveConnection();
                 } catch (Exception e) {
-                    Log.e("MainActivity", "Something went wrong while we extracted connection details from binder.", e);
+                    Log.e(TAG, "Something went wrong while we extracted connection details from binder.", e);
                 }
             } else if (ACTION_STOP.equals(intent.getAction())) {
                 finishAffinity();
             } else if (ACTION_PREFERENCES_CHANGED.equals(intent.getAction())) {
-                Log.d("MainActivity", "preference: " + intent.getStringExtra("key"));
+                Log.v(TAG, "preference: " + intent.getStringExtra("key"));
                 if (!"additionalKbdVisible".equals(intent.getStringExtra("key")))
                     onPreferencesChanged("");
+            } else if (DESTROY_ACTIVITY_FROM_X.equals(intent.getAction())){
+                WindowAttribute attr = intent.getParcelableExtra(ACTION_X_WINDOW_ATTRIBUTE);
+                if(mAttribute != null && attr != null && mAttribute.getXID() == attr.getXID()){
+                    Log.d(TAG, "onReceive: "  + DESTROY_ACTIVITY_FROM_X  + " attr:" + attr);
+                    killSelf = true;
+                    finish();
+                    App.getApp().stopingActivityWindow.add(mAttribute.getXID());
+                }
+            } else if (START_ACTIVITY_FROM_X.equals(intent.getAction())){
+                WindowAttribute attr = intent.getParcelableExtra(ACTION_X_WINDOW_ATTRIBUTE);
+                if(mAttribute != null && attr != null && mAttribute.getXID() == attr.getTaskTo()){
+//                    Log.d(TAG, "onReceive: "  + START_ACTIVITY_FROM_X  + " attr:" + attr);
+                    ActivityOptions options = ActivityOptions.makeBasic();
+//                    options.setLaunchBounds(new Rect((int)attr.getOffsetX(),
+//                            (int)(attr.getOffsetY()),
+//                            (int)(attr.getWidth() + attr.getOffsetX()),
+//                            (int)(attr.getHeight() + attr.getOffsetY())));
+                    Intent startAct = new Intent(MainActivity.this, MainActivity.MainActivity11.class);
+                    startAct.putExtra(X_WINDOW_ATTRIBUTE, attr);
+                    options.setLaunchBounds(new Rect(100, 100, 200 , 200));
+                    startActivity(startAct, options.toBundle());
+                }
+            } else if(STOP_WINDOW_FROM_X.equals(intent.getAction())){
+                WindowAttribute attr = intent.getParcelableExtra(ACTION_X_WINDOW_ATTRIBUTE);
+                if(mAttribute != null && attr != null && mAttribute.getXID() == attr.getXID()
+                        && mAttribute.getWindowPtr() == attr.getWindowPtr()
+                        && mProperty!=null && mProperty.getSupportDeleteWindow() == 1
+//                        && App.getApp().stopingActivityWindow.contains(attr.getWindowPtr())
+                ){
+                    Log.d(TAG, "onReceive: " + STOP_WINDOW_FROM_X + ", attr:" + attr + "");
+                    finish();
+                }
+            } else if(MODALED_ACTION_ACTIVITY_FROM_X.equals(intent.getAction())){
+                WindowAttribute attr = intent.getParcelableExtra(ACTION_X_WINDOW_ATTRIBUTE);
+                Property property = intent.getParcelableExtra(ACTION_X_WINDOW_PROPERTY);
+                if(attr != null && property != null && property.getTransientfor() == mAttribute.getXID()){
+                    Log.d(TAG, "onReceive: " + MODALED_ACTION_ACTIVITY_FROM_X + ", property:" + property + "");
+//                    getWindow().addFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE|
+//                            FLAG_NOT_TOUCHABLE);
+                }
+            } else if(UNMODALED_ACTION_ACTIVITY_FROM_X.equals(intent.getAction())){
+                WindowAttribute attr = intent.getParcelableExtra(ACTION_X_WINDOW_ATTRIBUTE);
+                if(attr != null ){
+                    Log.d(TAG, "onReceive: " + UNMODALED_ACTION_ACTIVITY_FROM_X + ", attr:" + attr + "");
+                    getWindow().clearFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE|
+                            FLAG_NOT_TOUCHABLE);
+                }
+            } else if(ACTION_UPDATE_ICON.equals(intent.getAction())){
+                long windowId = intent.getLongExtra("window_id", 0);
+                if(mAttribute !=  null && windowId == mAttribute.getXID()){
+//                    Log.d(TAG, "onReceive: " + title + ", windowId:" + windowId + " mAttribute:" + mAttribute) ;
+                    Bitmap windowIcon = intent.getParcelableExtra("window_icon");
+                    ActivityManager.TaskDescription description = new ActivityManager.TaskDescription(title , windowIcon, 0);
+                    MainActivity.this.setTaskDescription(description);
+
+                }
             }
         }
     };
@@ -190,20 +251,42 @@ public class MainActivity extends AppCompatActivity implements View.OnApplyWindo
         return instance;
     }
 
+    protected int getLayoutID(){
+        return R.layout.main_activity;
+    }
+
+    // Used to set the contents of the clipboard.
+    android.content.ClipboardManager.OnPrimaryClipChangedListener mOnPrimaryClipChangedListener;
+    android.content.ClipboardManager mClipboardManager;
+    private String mClipText = null;
+
+
     @Override
     @SuppressLint({"AppCompatMethod", "ObsoleteSdkInt", "ClickableViewAccessibility", "WrongConstant", "UnspecifiedRegisterReceiverFlag"})
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-
-        mAttribute = getIntent().getParcelableExtra(LINUX_WINDOW_ATTRIBUTE);
+        if(hideDecorCaptionView()){
+            mDecorCaptionViewHeight = 0;
+        }
+        int measuredHeight = getWindow().getDecorView().getMeasuredHeight();
+//        setOverlayWithDecorCaptionEnabled(false);
+        am = (ActivityManager) getSystemService(ACTIVITY_SERVICE);
+        mAttribute = getIntent().getParcelableExtra(X_WINDOW_ATTRIBUTE);
         if(mAttribute != null){
             mIndex = mAttribute.getIndex();
-            WindowCode = mAttribute.getWindowPtr();
+            WindowCode = mAttribute.getXID();
+            mWindowRect.set(mAttribute.getRect());
         }
-        Log.d(TAG, "onCreate() " +  this  +  " mCoordinate = [" + mAttribute + "]" +
-                " , WindowCode = " + Long.toHexString(WindowCode) + ", index = " + mIndex);
+        mProperty = getIntent().getParcelableExtra(X_WINDOW_PROPERTY);
+        if(mProperty != null){
+            String wmClass = mProperty.getWm_class();
+            String netName = mProperty.getNet_name();
+            this.title  = TextUtils.isEmpty(wmClass) ? (TextUtils.isEmpty(netName) ? APP_TITLE_PREFIX: APP_TITLE_PREFIX + ": "+ netName) : APP_TITLE_PREFIX + ": "+ wmClass;
+            Log.d(TAG, "onCreate: title:" + title + "");
+            setTitle(title);
+        }
         Util.setBaseContext(this);
-        CmdEntryPoint.ctx = this;
+//        Xserver.ctx = this;
         SharedPreferences preferences = PreferenceManager.getDefaultSharedPreferences(this);
         int modeValue = Integer.parseInt(preferences.getString("touchMode", "1")) - 1;
         if (modeValue > 2) {
@@ -211,17 +294,18 @@ public class MainActivity extends AppCompatActivity implements View.OnApplyWindo
             e.putString("touchMode", "1");
             e.apply();
         }
-        
         preferences.registerOnSharedPreferenceChangeListener((sharedPreferences, key) -> onPreferencesChanged(key));
-
-        getWindow().setFlags(FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS | FLAG_KEEP_SCREEN_ON | FLAG_TRANSLUCENT_STATUS, 0);
+//        getWindow().setFlags(FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS | FLAG_KEEP_SCREEN_ON | FLAG_TRANSLUCENT_STATUS, 0);
         requestWindowFeature(Window.FEATURE_NO_TITLE);
-        setContentView(R.layout.main_activity);
+        setContentView(getLayoutID());
+//        View decorView = getWindow().getDecorView().findViewById(android.R.id.content);
+//        decorView.setMinimumWidth(500);
+//        decorView.setMinimumHeight(500);
 
+        detectEventEditText = findViewById(R.id.inputlayout);
         frm = findViewById(R.id.frame);
         findViewById(R.id.preferences_button).setOnClickListener((l) -> startActivity(new Intent(this, LoriePreferences.class) {{ setAction(Intent.ACTION_MAIN); }}));
         findViewById(R.id.help_button).setOnClickListener((l) -> startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/termux/termux-x11/blob/master/README.md#running-graphical-applications"))));
-
         LorieView lorieView = findViewById(R.id.lorieView);
         lorieView.updateCoordinate(mAttribute);
         View lorieParent = (View) lorieView.getParent();
@@ -238,7 +322,6 @@ public class MainActivity extends AppCompatActivity implements View.OnApplyWindo
                     toggleExtraKeys();
                 return true;
             }
-
             if (k == KEYCODE_BACK) {
                 if (e.isFromSource(InputDevice.SOURCE_MOUSE) || e.isFromSource(InputDevice.SOURCE_MOUSE_RELATIVE)) {
                     if (e.getRepeatCount() != 0) // ignore auto-repeat
@@ -255,7 +338,6 @@ public class MainActivity extends AppCompatActivity implements View.OnApplyWindo
                     return true;
                 }
             }
-
             return mInputHandler.sendKeyEvent(v, e);
         };
 
@@ -268,62 +350,57 @@ public class MainActivity extends AppCompatActivity implements View.OnApplyWindo
 
         lorieView.setCallback((sfc, surfaceWidth, surfaceHeight, screenWidth, screenHeight) -> {
             int framerate = (int) ((lorieView.getDisplay() != null) ? lorieView.getDisplay().getRefreshRate() : 30);
-
             mInputHandler.handleHostSizeChanged(surfaceWidth, surfaceHeight);
             mInputHandler.handleClientSizeChanged(screenWidth, screenHeight);
-
-            Log.d(TAG, "onCreate: surfaceWidth:" + surfaceWidth + "  surfaceHeight:"  + surfaceHeight
-                    + "  screenWidth: " + screenWidth + "  screenHeight: " + screenHeight
-            );
-//            if(getWindowId() == 0){
-                LorieView.sendWindowChange(1920, 989, framerate);
-//            }
-            WindowAttribute coordinate = (WindowAttribute) lorieView.getTag(R.id.WINDOW_ARRTRIBUTE);
-            if (service != null ) {
-                if(coordinate == null){
+//            Log.v(TAG, "onCreate: surfaceWidth:" + surfaceWidth + "  surfaceHeight:"  + surfaceHeight
+//                    + "  screenWidth: " + screenWidth + "  screenHeight: " + screenHeight
+//            );
+            LorieView.sendWindowChange(AppUtils.GLOBAL_SCREEN_WIDTH, AppUtils.GLOBAL_SCREEN_HEIGHT, framerate);
+            WindowAttribute attribute = (WindowAttribute) lorieView.getTag(R.id.WINDOW_ARRTRIBUTE);
+            if (service != null && !killSelf) {
+                if(attribute == null){
                     try {
                         service.windowChanged(sfc, 0, 0,
-                                1920, 989, 0,
-                                1000);
-                    } catch (RemoteException e) {
+                                AppUtils.GLOBAL_SCREEN_WIDTH, AppUtils.GLOBAL_SCREEN_HEIGHT, 0,
+                                1000, 1000);
+                    } catch (Exception e) {
                         e.printStackTrace();
                     }
                 } else {
                     try {
                         if(surfaceWidth == 0 || surfaceHeight == 0){
                             service.windowChanged(sfc, 0, 0,
-                                    0, 0, coordinate.getIndex(),
-                                    coordinate.getWindowPtr());
+                                    0, 0, attribute.getIndex(),
+                                    attribute.getWindowPtr(), attribute.getXID());
                         } else {
-                            service.windowChanged(sfc, coordinate.getOffsetX(), coordinate.getOffsetY(),
-                                    coordinate.getWidth(), coordinate.getHeight(), coordinate.getIndex(),
-                                    coordinate.getWindowPtr());
+                            service.windowChanged(sfc, attribute.getOffsetX(), attribute.getOffsetY(),
+                                    attribute.getWidth(), attribute.getHeight(), attribute.getIndex(),
+                                    attribute.getWindowPtr(), attribute.getXID());
                         }
 
 
-                    } catch (RemoteException e) {
+                    } catch (Exception e) {
                         e.printStackTrace();
                     }
                 }
-
-
-
             }
         });
-
-//        if(getWindowId() == 0){
-            registerReceiver(receiver, new IntentFilter(ACTION_START) {{
-                addAction(ACTION_PREFERENCES_CHANGED);
-                addAction(ACTION_STOP);
-            }}, SDK_INT >= VERSION_CODES.TIRAMISU ? RECEIVER_EXPORTED : 0);
-//        }
+        getLorieView().setPointerIcon(PointerIcon.getSystemIcon(this, PointerIcon.TYPE_NULL));
+        registerReceiver(receiver, new IntentFilter(ACTION_START) {{
+            addAction(ACTION_PREFERENCES_CHANGED);
+            addAction(ACTION_STOP);
+            addAction(DESTROY_ACTIVITY_FROM_X);
+            addAction(START_ACTIVITY_FROM_X);
+            addAction(STOP_WINDOW_FROM_X);
+            addAction(MODALED_ACTION_ACTIVITY_FROM_X);
+            addAction(UNMODALED_ACTION_ACTIVITY_FROM_X);
+            addAction(ACTION_UPDATE_ICON);
+        }},  0);
         // Taken from Stackoverflow answer https://stackoverflow.com/questions/7417123/android-how-to-adjust-layout-in-full-screen-mode-when-softkeyboard-is-visible/7509285#
         FullscreenWorkaround.assistActivity(this);
-        mNotificationManager = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
-        mNotification = buildNotification();
-        mNotificationManager.notify(mNotificationId, mNotification);
-
-        CmdEntryPoint.requestConnection();
+        detectEventEditText.setOnKeyListener(mLorieKeyListener);
+        detectEventEditText.setInputHandler(mInputHandler);
+        Xserver.requestConnection();
         onPreferencesChanged("");
 
         toggleExtraKeys(false, false);
@@ -331,44 +408,128 @@ public class MainActivity extends AppCompatActivity implements View.OnApplyWindo
 
         initStylusAuxButtons();
         initMouseAuxButtons();
-
-        if (SDK_INT >= VERSION_CODES.TIRAMISU
-                && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PERMISSION_GRANTED
-                && !shouldShowRequestPermissionRationale(Manifest.permission.POST_NOTIFICATIONS)) {
-            requestPermissions(new String[] { Manifest.permission.POST_NOTIFICATIONS }, 0);
-        }
-//        execWindowManager();
+        bindXserver();
+        builder = new EasyDialog.Builder(this);
+        initClipMonitor();
     }
 
-    private void execWindowManager() {
+
+    private void initClipMonitor() {
+        mClipboardManager = (android.content.ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+        mOnPrimaryClipChangedListener = () -> {
+            updateX11Cliptext();
+        };
+        mClipboardManager.addPrimaryClipChangedListener(mOnPrimaryClipChangedListener);
+    }
+
+    private void updateX11Cliptext() {
+        if (mClipboardManager.hasPrimaryClip()
+                && mClipboardManager.getPrimaryClip().getItemCount() > 0) {
+            CharSequence content =
+                    mClipboardManager.getPrimaryClip().getItemAt(0).getText();
+            Log.d(TAG, "clip:content:" + content);
+            if(content != null && !TextUtils.isEmpty(content)
+                    && !TextUtils.equals(content, mClipText)
+            && checkServiceExits()){
+                mClipText = content.toString();
+                Log.d(TAG, "run cliptext:" + mClipText);
+                try {
+                    service.sendClipText(mClipText);
+                } catch (RemoteException e) {
+                    throw new RuntimeException(e);
+                }
+            }
+        }
+    }
+
+    protected boolean hideDecorCaptionView() {
+        return false;
+    }
+
+
+    private void bindXserver() {
         try {
-            Log.d(TAG, "execWindowManager() called");
-            File file = new File(getApplicationInfo().nativeLibraryDir + "/libbspwm.so");
-            file.setExecutable(true); // make program executable
-            ProcessBuilder pb = new ProcessBuilder(file.getPath());
-            Map<String, String> env = pb.environment();
-            env.put("DISPLAY", "127.0.0.1:0");
-            File file1 = new File(getApplicationInfo().dataDir);
-            Log.d(TAG, "execWindowManager() called " + file1.exists());
-            pb.directory(file1); // execute within dataDir
-            Process start = pb.start();
-            Log.d(TAG, "execWindowManager() called after");
+            bindService(new Intent(this, XWindowService.class), connection, Context.BIND_AUTO_CREATE);
         } catch (Exception e) {
-            Log.d(TAG, "execWindowManager() called e:" + e);
             e.printStackTrace();
         }
     }
 
-    @Override
-    protected void onDestroy() {
-        unregisterReceiver(receiver);
-        super.onDestroy();
-        try {
-            service.unregisterListener(mIndex, listener);
-        } catch (RemoteException e) {
-            throw new RuntimeException(e);
+    public class Connection implements ServiceConnection {
+        private ICmdEntryInterface cmdEntryInterface;
+
+        public ICmdEntryInterface getInterface(){
+            return cmdEntryInterface;
+        }
+
+
+        @Override
+        public void onServiceConnected(ComponentName name, IBinder service) {
+            cmdEntryInterface = ICmdEntryInterface.Stub.asInterface(service);
+            if(!killSelf){
+                MainActivity.this.service = cmdEntryInterface;
+                try {
+                    Objects.requireNonNull(MainActivity.this.service).asBinder().linkToDeath(() -> {
+                        MainActivity.this.service = null;
+                        Log.v(TAG, "Disconnected");
+//                        showXserverDisconnect(MainActivity.this);
+                    }, 0);
+                } catch (RemoteException e) {
+                    e.printStackTrace();
+                }
+            }
+//            showXserverConnectSuccess(MainActivity.this);
+        }
+
+        @Override
+        public void onServiceDisconnected(ComponentName name) {
+            Log.v(TAG, "onServiceDisconnected: ");
+//            showXserverDisconnect(MainActivity.this);
         }
     }
+
+
+    ServiceConnection connection = new Connection();
+
+    @Override
+    public void onAttachedToWindow() {
+        super.onAttachedToWindow();
+//        Log.d(TAG, "onAttachedToWindow: ");
+    }
+
+    @Override
+    public void onDetachedFromWindow() {
+        super.onDetachedFromWindow();
+//        Log.d(TAG, "onDetachedFromWindow: ");
+    }
+
+
+
+    @Override
+    public void onWindowAttributesChanged(WindowManager.LayoutParams params) {
+//        setOverlayWithDecorCaptionEnabled(false);
+        Log.d(TAG, "onWindowAttributesChanged: params:" + params + "");
+        super.onWindowAttributesChanged(params);
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        unregisterReceiver(receiver);
+        unbindService(connection);
+        service = null;
+        Log.v(TAG, "onDestroy: " + mAttribute);
+        removeClipboardListener();
+    }
+
+    private void removeClipboardListener() {
+        if(mClipboardManager != null){
+            mClipboardManager.removePrimaryClipChangedListener(mOnPrimaryClipChangedListener);
+            mClipboardManager = null;
+        }
+        mOnPrimaryClipChangedListener = null;
+    }
+
 
     //Register the needed events to handle stylus as left, middle and right click
     @SuppressLint("ClickableViewAccessibility")
@@ -502,20 +663,20 @@ public class MainActivity extends AppCompatActivity implements View.OnApplyWindo
 
         Map.of(left, InputStub.BUTTON_LEFT, middle, InputStub.BUTTON_MIDDLE, right, InputStub.BUTTON_RIGHT)
                 .forEach((v, b) -> v.setOnTouchListener((__, e) -> {
-            switch(e.getAction()) {
-                case MotionEvent.ACTION_DOWN:
-                case MotionEvent.ACTION_POINTER_DOWN:
-                    getLorieView().sendMouseEvent(0, 0, b, true, true, mIndex);
-                    v.setPressed(true);
-                    break;
-                case MotionEvent.ACTION_UP:
-                case MotionEvent.ACTION_POINTER_UP:
-                    getLorieView().sendMouseEvent(0, 0, b, false, true, mIndex);
-                    v.setPressed(false);
-                    break;
-            }
-            return true;
-        }));
+                    switch(e.getAction()) {
+                        case MotionEvent.ACTION_DOWN:
+                        case MotionEvent.ACTION_POINTER_DOWN:
+                            getLorieView().sendMouseEvent(0, 0, b, true, true, mIndex);
+                            v.setPressed(true);
+                            break;
+                        case MotionEvent.ACTION_UP:
+                        case MotionEvent.ACTION_POINTER_UP:
+                            getLorieView().sendMouseEvent(0, 0, b, false, true, mIndex);
+                            v.setPressed(false);
+                            break;
+                    }
+                    return true;
+                }));
 
         pos.setOnTouchListener(new View.OnTouchListener() {
             final int touchSlop = (int) Math.pow(ViewConfiguration.get(MainActivity.this).getScaledTouchSlop(), 2);
@@ -565,14 +726,10 @@ public class MainActivity extends AppCompatActivity implements View.OnApplyWindo
         try {
             if (service != null && service.asBinder().isBinderAlive()) {
                 Log.v("LorieBroadcastReceiver", "Extracting logcat fd.");
-//                ParcelFileDescriptor logcatOutput = service.getLogcatOutput();
-//                if (logcatOutput != null)
-//                    LorieView.startLogcat(logcatOutput.detachFd());
-
                 tryConnect();
             }
         } catch (Exception e) {
-            Log.e("MainActivity", "Something went wrong while we were establishing connection", e);
+            Log.e(TAG, "Something went wrong while we were establishing connection", e);
         }
     }
 
@@ -586,11 +743,12 @@ public class MainActivity extends AppCompatActivity implements View.OnApplyWindo
                 LorieView.connect(fd.detachFd());
                 getLorieView().triggerCallback();
                 clientConnectedStateChanged(true);
-                LorieView.setClipboardSyncEnabled(PreferenceManager.getDefaultSharedPreferences(this).getBoolean("clipboardSync", false));
+                LorieView.setClipboardSyncEnabled(PreferenceManager.getDefaultSharedPreferences(this).getBoolean("clipboardSync", true));
+//                handler.postDelayed(this::goback, 2000);
             } else
                 handler.postDelayed(this::tryConnect, 500);
         } catch (Exception e) {
-            Log.e("MainActivity", "Something went wrong while we were establishing connection", e);
+            Log.e(TAG, "Something went wrong while we were establishing connection", e);
             service = null;
 
             // We should reset the View for the case if we have sent it's surface to the client.
@@ -618,7 +776,7 @@ public class MainActivity extends AppCompatActivity implements View.OnApplyWindo
 
         setTerminalToolbarView();
         onWindowFocusChanged(true);
-        LorieView.setClipboardSyncEnabled(p.getBoolean("clipboardSync", false));
+        LorieView.setClipboardSyncEnabled(p.getBoolean("clipboardSync", true));
 
         lorieView.triggerCallback();
 
@@ -669,20 +827,48 @@ public class MainActivity extends AppCompatActivity implements View.OnApplyWindo
     @Override
     public void onResume() {
         super.onResume();
-
-        mNotificationManager.notify(mNotificationId, mNotification);
         setTerminalToolbarView();
-        getLorieView().requestFocus();
+        getWindow().getDecorView().postDelayed(()->{
+            if(!correctMarked){
+                correctMarked = true;
+                try {
+                    checkConfiguration(mConfiguration, true);
+                } catch (RemoteException e) {
+                    throw new RuntimeException(e);
+                }
+            }
+        },1000);
+//        getLorieView().requestFocus();
         String hexString = Long.toHexString(getWindowId());
-        Log.d(TAG, String.format("onResume() called: 0x%s", hexString));
+        Log.v(TAG, String.format("onResume() called: 0x%s", hexString));
+        detectViewRequestFocus();
+    }
+
+    private void detectViewRequestFocus() {
+        detectEventEditText.setFocusable(true);
+        detectEventEditText.setFocusableInTouchMode(true);
+        detectEventEditText.requestFocus();
+    }
+
+    public void onTextViewClicked(View view) {
+        detectEventEditText.requestFocus();
+        detectEventEditText.setFocusableInTouchMode(true);
+//        InputMethodManager inputMgr = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
+//        inputMgr.showSoftInput(inputlayout,
+//                InputMethodManager.SHOW_FORCED);
     }
 
     @Override
     public void onPause() {
-        for (StatusBarNotification notification: mNotificationManager.getActiveNotifications())
-            if (notification.getId() == mNotificationId)
-                mNotificationManager.cancel(mNotificationId);
         super.onPause();
+//        Log.d(TAG, "onPause: ");
+    }
+
+    @Override
+    protected void onStop() {
+        super.onStop();
+//        closeXwindow();
+//        Log.d(TAG, "onStop: ");
     }
 
     public LorieView getLorieView() {
@@ -704,7 +890,7 @@ public class MainActivity extends AppCompatActivity implements View.OnApplyWindo
         boolean showNow = enabled && preferences.getBoolean("additionalKbdVisible", true);
 
         terminalToolbarViewPager.setVisibility(showNow ? View.VISIBLE : View.GONE);
-        findViewById(R.id.terminal_toolbar_view_pager).requestFocus();
+//        findViewById(R.id.terminal_toolbar_view_pager).requestFocus();
 
         handler.postDelayed(() -> {
             if (mExtraKeys != null) {
@@ -740,14 +926,14 @@ public class MainActivity extends AppCompatActivity implements View.OnApplyWindo
 
             pager.setVisibility(show ? View.VISIBLE : View.INVISIBLE);
 
-            getLorieView().requestFocus();
+//            getLorieView().requestFocus();
         });
     }
 
     public void toggleExtraKeys() {
         int visibility = getTerminalToolbarViewPager().getVisibility();
         toggleExtraKeys(visibility != View.VISIBLE, true);
-        getLorieView().requestFocus();
+//        getLorieView().requestFocus();
     }
 
     public boolean handleKey(KeyEvent e) {
@@ -759,6 +945,7 @@ public class MainActivity extends AppCompatActivity implements View.OnApplyWindo
 
     @SuppressLint("ObsoleteSdkInt")
     Notification buildNotification() {
+        Log.d(TAG, "buildNotification");
         Intent preferencesIntent = new Intent(this, LoriePreferences.class);
         preferencesIntent.putExtra("key", "value");
         preferencesIntent.setAction(Intent.ACTION_MAIN);
@@ -802,19 +989,17 @@ public class MainActivity extends AppCompatActivity implements View.OnApplyWindo
     @Override
     public void onConfigurationChanged(@NonNull Configuration newConfig) {
         super.onConfigurationChanged(newConfig);
-
-        if (newConfig.orientation != orientation) {
-            InputMethodManager imm = (InputMethodManager) getSystemService(Activity.INPUT_METHOD_SERVICE);
-            View view = getCurrentFocus();
-            if (view == null) {
-                view = getLorieView();
-                view.requestFocus();
-            }
-            imm.hideSoftInputFromWindow(view.getWindowToken(), 0);
-        }
-
         orientation = newConfig.orientation;
         setTerminalToolbarView();
+        Log.d(TAG, "onConfigurationChanged: newConfig:" + newConfig + "");
+        if(!checkServiceExits()){
+            return;
+        }
+        try {
+            checkConfiguration(newConfig, true);
+        } catch (RemoteException e) {
+            e.printStackTrace();
+        }
     }
 
     @SuppressLint("WrongConstant")
@@ -824,16 +1009,16 @@ public class MainActivity extends AppCompatActivity implements View.OnApplyWindo
         SharedPreferences p = PreferenceManager.getDefaultSharedPreferences(this);
         Window window = getWindow();
         View decorView = window.getDecorView();
+        Log.d(TAG, "onWindowFocusChanged: hasFocus:" + hasFocus + " index:" + mAttribute.getIndex());
         boolean fullscreen = p.getBoolean("fullscreen", false);
         boolean reseed = p.getBoolean("Reseed", true);
-
         fullscreen = fullscreen || getIntent().getBooleanExtra(REQUEST_LAUNCH_EXTERNAL_DISPLAY, false);
-
         int requestedOrientation = p.getBoolean("forceLandscape", false) ?
                 ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE : ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED;
-        if (getRequestedOrientation() != requestedOrientation)
+        if (getRequestedOrientation() != requestedOrientation){
             setRequestedOrientation(requestedOrientation);
-
+        }
+        Util.set("fde.click_as_touch", "false");
         if (hasFocus) {
             if (SDK_INT >= VERSION_CODES.P) {
                 if (p.getBoolean("hideCutout", false))
@@ -847,39 +1032,186 @@ public class MainActivity extends AppCompatActivity implements View.OnApplyWindo
             window.setStatusBarColor(Color.BLACK);
             window.setNavigationBarColor(Color.BLACK);
         }
-
         window.setFlags(FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS | FLAG_KEEP_SCREEN_ON | FLAG_TRANSLUCENT_STATUS, 0);
         if (hasFocus) {
-            if (fullscreen) {
-                window.addFlags(FLAG_FULLSCREEN);
-                decorView.setSystemUiVisibility(
-                        View.SYSTEM_UI_FLAG_LAYOUT_STABLE
-                                | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
-                                | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-                                | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-                                | View.SYSTEM_UI_FLAG_FULLSCREEN
-                                | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
-            } else {
-                window.clearFlags(FLAG_FULLSCREEN);
-                decorView.setSystemUiVisibility(0);
-            }
+//            if (fullscreen) {
+            window.addFlags(FLAG_FULLSCREEN);
+            decorView.setSystemUiVisibility(
+                    View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                            | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                            | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                            | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                            | View.SYSTEM_UI_FLAG_FULLSCREEN
+                            | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
+//            } else {
+//                window.clearFlags(FLAG_FULLSCREEN);
+//                decorView.setSystemUiVisibility(0);
+//            }
+            getWindow().clearFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE|
+                    FLAG_NOT_TOUCHABLE);
         }
-
         if (p.getBoolean("keepScreenOn", true))
             window.addFlags(FLAG_KEEP_SCREEN_ON);
         else
             window.clearFlags(FLAG_KEEP_SCREEN_ON);
-
-        window.setSoftInputMode((reseed ? SOFT_INPUT_ADJUST_RESIZE : SOFT_INPUT_ADJUST_PAN) | SOFT_INPUT_STATE_HIDDEN);
-
-        ((FrameLayout) findViewById(android.R.id.content)).getChildAt(0).setFitsSystemWindows(!fullscreen);
+//        window.setSoftInputMode((reseed ? SOFT_INPUT_ADJUST_RESIZE : SOFT_INPUT_ADJUST_PAN) | SOFT_INPUT_STATE_HIDDEN);
+//        ((FrameLayout) findViewById(android.R.id.content)).getChildAt(0).setFitsSystemWindows(!fullscreen);
         SamsungDexUtils.dexMetaKeyCapture(this, hasFocus && p.getBoolean("dexMetaKeyCapture", false));
-
-        if (hasFocus)
+        if (hasFocus && mIndex != 0){
             getLorieView().regenerate();
-
-        Log.d(TAG, "onWindowFocusChanged() called with: hasFocus = [" + hasFocus + "]");
+            execInWindowManager();
+        }
         getLorieView().requestFocus();
+        detectViewRequestFocus();
+        getClipText();
+    }
+
+    private void getClipText() {
+        if (mClipboardManager != null && mClipboardManager.hasPrimaryClip()
+                && mClipboardManager.getPrimaryClip().getItemCount() > 0) {
+            CharSequence content =
+                    mClipboardManager.getPrimaryClip().getItemAt(0).getText();
+            Log.d(TAG, "clip:content:" + content);
+            if(content != null && !TextUtils.isEmpty(content) &&
+                    !TextUtils.equals(content, mClipText) && checkServiceExits()){
+                mClipText = content.toString();
+                Log.d(TAG, "run cliptext:" + mClipText);
+                try {
+                    service.sendClipText(mClipText);
+                } catch (RemoteException e) {
+                    throw new RuntimeException(e);
+                }
+            }
+        }
+    }
+
+    protected void execInWindowManager()  {
+        List<ActivityManager.RunningTaskInfo> runningTasks = am.getRunningTasks(50);
+        for (ActivityManager.RunningTaskInfo info: runningTasks){
+            if(checkServiceExits() && TextUtils.equals(info.topActivity.getClassName(), getClass().getName())){
+                Configuration configuration = info.configuration;
+                try {
+                    checkConfiguration(configuration, false);
+                } catch (RemoteException e) {
+                    e.printStackTrace();
+                }
+                return;
+            }
+        }
+    }
+
+    private boolean checkServiceExits() {
+        return service != null && mAttribute != null;
+    }
+
+    private void checkConfiguration(Configuration configuration, boolean newConfig) throws RemoteException{
+        if(configuration == null){
+            return;
+        }
+//        Log.d(TAG, "checkConfiguration configuration:" + configuration + " mWindowRect:" + mWindowRect);
+        this.mConfiguration = configuration;
+        Pattern pattern = Pattern.compile("mBounds=Rect\\((-?\\d+), (-?\\d+) - (-?\\d+), (-?\\d+)\\)");
+        Matcher matcher = pattern.matcher(configuration.toString());
+        if(matcher.find()){
+            int left = Integer.parseInt(Objects.requireNonNull(matcher.group(1)));
+            int top = Integer.parseInt(Objects.requireNonNull(matcher.group(2)));
+            int right = Integer.parseInt(Objects.requireNonNull(matcher.group(3)));
+            int bottom = Integer.parseInt(Objects.requireNonNull(matcher.group(4)));
+            Rect rect = new Rect(left, (int) (top + mDecorCaptionViewHeight), right, bottom);
+            boolean samePosition = atSamePosition(rect);
+            boolean sameSize = atSameSize(rect);
+            if(service == null){
+                return;
+            }
+            if( newConfig ||  !samePosition || !sameSize ){
+//                Log.d(TAG, "checkConfiguration: move&resize ");
+                updateAttribueOnly(rect);
+                service.configureWindow(mAttribute.getWindowPtr(), mAttribute.getXID(),
+                        (int) mAttribute.getOffsetX(), (int) mAttribute.getOffsetY(),
+                        rect.right - rect.left, rect.bottom - rect.top);
+            }
+        }
+        service.raiseWindow(mAttribute.getXID());
+    }
+
+    private void updateAttribueOnly(Rect rect) {
+//        Log.d(TAG, "updateAttribue: rect:" + rect);
+        mWindowRect.set(rect);
+        mAttribute.setRect(rect);
+        getLorieView().setTag(R.id.WINDOW_ARRTRIBUTE, mAttribute);
+    }
+
+    private boolean atSameSize(Rect rect) {
+        Rect r = mWindowRect;
+        return ( r.right - r.left ) == ( rect.right - rect.left )
+                && ( r.bottom - r.top ) == ( rect.bottom - rect.top );
+    }
+
+    private boolean atSamePosition(Rect rect) {
+        Rect r = mWindowRect;
+        return r.left == rect.left && r.top == rect.top ;
+    }
+
+
+    public void onWindowDismissed(boolean finishTask, boolean suppressWindowTransition) {
+        if(checkServiceExits() && mProperty != null && mProperty.getSupportDeleteWindow() == 1){
+            closeXwindow();
+        } else {
+            finish();
+            App.getApp().stopingActivityWindow.add(mAttribute.getXID());
+        }
+//        showConfirmDialog();
+    }
+
+    private void showConfirmDialog() {
+        builder.setContentView(R.layout.dialog_warm_tip)
+                .addCustomAnimation(Gravity.CENTER, false)
+                .setCancelable(true)
+                .setText(R.id.tv_title, getString(R.string.exit_app))
+                .setText(R.id.tv_content, getString(R.string.exit_tip))
+                .setTextColor(R.id.tv_confirm, ContextCompat.getColor(this, R.color.white))
+                .setBackground(R.id.tv_confirm, ContextCompat.getDrawable(this, R.drawable.shape_confirm_bg))
+                .setWidthAndHeight(EasyUtils.dp2px(this, 320), LinearLayout.LayoutParams.WRAP_CONTENT)
+                .setOnClickListener(R.id.tv_cancel, v1 -> {
+                    easyDialog.dismiss();
+                })
+                .setOnClickListener(R.id.tv_confirm, v2 -> {
+//                    Toast.makeText(this, "", Toast.LENGTH_SHORT).show();
+                    easyDialog.dismiss();
+                    if(checkServiceExits()){
+                        closeXwindow();
+                    }
+                    finish();
+                    App.getApp().stopingActivityWindow.add(mAttribute.getXID());
+                })
+                .setOnCancelListener(dialog -> {
+                    easyDialog.dismiss();
+//                    Toast.makeText(this, "", Toast.LENGTH_SHORT).show();
+                })
+                .setOnDismissListener(dialog -> {
+//                    Toast.makeText(this, "", Toast.LENGTH_SHORT).show();
+                });
+        easyDialog = builder.create();
+        easyDialog.show();
+    }
+
+    private void closeXwindow() {
+        if(checkServiceExits()){
+            try {
+                WindowAttribute a = mAttribute;
+                service.windowChanged(null, a.getOffsetX(),
+                        a.getOffsetY(), a.getWidth(), a.getHeight(), a.getIndex(),
+                        a.getWindowPtr(), a.getXID());
+                service.closeWindow(a.getIndex(), a.getWindowPtr(), a.getXID());
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        }
+    }
+
+    public boolean dispatchKeyEvent(KeyEvent event) {
+//        Log.d(TAG, "dispatchKeyEvent: event:" + event + "");
+        return super.dispatchKeyEvent(event);
     }
 
     @Override
@@ -927,7 +1259,7 @@ public class MainActivity extends AppCompatActivity implements View.OnApplyWindo
      */
     public static void toggleKeyboardVisibility(Context context) {
         InputMethodManager inputMethodManager = (InputMethodManager) context.getSystemService(Context.INPUT_METHOD_SERVICE);
-        Log.d("MainActivity", "Toggling keyboard visibility");
+        Log.v(TAG, "Toggling keyboard visibility");
         if(inputMethodManager != null)
             inputMethodManager.toggleSoftInput(InputMethodManager.SHOW_FORCED, 0);
     }
@@ -946,9 +1278,8 @@ public class MainActivity extends AppCompatActivity implements View.OnApplyWindo
             // We should recover connection in the case if file descriptor for some reason was broken...
             if (!connected)
                 tryConnect();
-
             if (connected && mIndex != 0){
-//                getLorieView().setPointerIcon(PointerIcon.getSystemIcon(this, PointerIcon.TYPE_NULL));
+                getLorieView().setPointerIcon(PointerIcon.getSystemIcon(this, PointerIcon.TYPE_NULL));
             }
         });
     }
@@ -958,5 +1289,19 @@ public class MainActivity extends AppCompatActivity implements View.OnApplyWindo
 //        handler.postDelayed(this::checkXEvents, 300);
     }
 
+    public static class MainActivity1 extends MainActivity {
+    }
 
+    public static class MainActivity11 extends MainActivity {
+
+        protected int getLayoutID() {
+            return R.layout.main_activity;
+        }
+
+        protected boolean hideDecorCaptionView() {
+            getWindow().setFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN,
+                    WindowManager.LayoutParams.FLAG_FULLSCREEN);
+            return true;
+        }
+    }
 }

@@ -5,7 +5,6 @@
 #include "include/window_manager.h"
 #include "include/X11/keysymdef.h"
 #include "include/X11/extensions/Xcomposite.h"
-#include <set>
 
 
 using ::std::max;
@@ -16,14 +15,10 @@ using ::std::unique_ptr;
 bool WindowManager::wm_detected_;
 bool WindowManager::support_composite;
 mutex WindowManager::wm_detected_mutex_;
-Window frame_window;
-Window top_level_debug;
-std::set<Window> window_under_frames;
-std::set<Window> frames;
-std::set<Window> named_windows;
 
-::WindowManager *WindowManager::create() {
-    Display* display = XOpenDisplay(":1");
+
+::WindowManager *WindowManager::create(const char *export_display, JNIEnv * env, jclass cls) {
+    Display* display = XOpenDisplay(export_display);
     if (display == nullptr) {
         log("Failed to open X display");
         return nullptr;
@@ -38,7 +33,7 @@ WindowManager::WindowManager(Display* display)
           root_(DefaultRootWindow(display_)),
           WM_PROTOCOLS(XInternAtom(display_, "WM_PROTOCOLS", false)),
           WM_DELETE_WINDOW(XInternAtom(display_, "WM_DELETE_WINDOW", false)),
-                           stoped(False) {
+          stoped(False) {
 }
 
 
@@ -61,17 +56,17 @@ WindowManager::~WindowManager() {
 
 
 void WindowManager::Frame(Window w, bool was_created_before_window_manager) {
-    log("Frame() %x", w);
+    log("Frame_ %x", w);
     // Visual properties of the frame to create.
-    const unsigned int BORDER_WIDTH = 3;
-    const unsigned long BORDER_COLOR = 0xff0000;
-    const unsigned long BG_COLOR = 0x0000ff;
+    const unsigned int BORDER_WIDTH = 1;
+    const unsigned long BORDER_COLOR = 0xffffff;
+    const unsigned long BG_COLOR = 0xffffff;
     // We shouldn't be framing windows we've already framed.
     CHECK(!clients_.count(w))
 
     // 1. Retrieve attributes of window to frame.
     XWindowAttributes x_window_attrs;
-    CHECK(XGetWindowAttributes(display_, w, &x_window_attrs));
+    CHECK(!XGetWindowAttributes(display_, w, &x_window_attrs));
 
     // 2. If window was created before window manager started, we should frame
     // it only if it is visible and doesn't set override_redirect.
@@ -97,7 +92,7 @@ void WindowManager::Frame(Window w, bool was_created_before_window_manager) {
     XSelectInput(
             display_,
             frame,
-            SubstructureRedirectMask | SubstructureNotifyMask);
+            BASE_EVENT_MASK);
     // 5. Add client to save set, so that it will be restored and kept alive if we
     // crash.
     XAddToSaveSet(display_, w);
@@ -154,13 +149,56 @@ void WindowManager::Frame(Window w, bool was_created_before_window_manager) {
             false,
             GrabModeAsync,
             GrabModeAsync);
-    frame_window = frame;
-    top_level_debug = w;
     window_under_frames.insert(w);
     frames.insert(frame);
-    log("Framed window %x frame %x" ,w , frame);
+    log("Framed_ window %x reparent to frame %x" ,w , frame);
 }
 
+bool WindowManager::isNormalWindow(long window) {
+    Atom actualType;
+    int actualFormat;
+    unsigned long nItems, bytesAfter;
+    unsigned char *propData = NULL;
+    char *atomName = XGetAtomName(display_, _NET_WM_WINDOW_TYPE);
+    Atom type = XInternAtom(display_, "_NET_WM_WINDOW_TYPE", False);
+    Atom type_nomarl = XInternAtom(display_, "_NET_WM_WINDOW_TYPE_NORMAL", False);
+    Atom type_menu = XInternAtom(display_, "_NET_WM_WINDOW_TYPE_MENU", False);
+    Atom type_dialog = XInternAtom(display_, "_NET_WM_WINDOW_TYPE_DIALOG", False);
+    Atom type_popup = XInternAtom(display_, "_NET_WM_WINDOW_TYPE_POPUP_MENU", False);
+    log("isNormalWindow ? %lx", window);
+    if (XGetWindowProperty(display_, window, type, 0, 1024, False, AnyPropertyType,
+                           &actualType, &actualFormat, &nItems, &bytesAfter, &propData) ==
+        Success) {
+        log(" actualType = %ld \n", actualType);
+        if (actualType == XA_ATOM) {
+            Atom *atoms = (Atom *) propData;
+            for (int i = 0; i < nItems; i++) {
+                if (atoms[i] == type_nomarl) {
+                    continue;
+                } else if (atoms[i] == type_menu
+                           || atoms[i] == type_dialog
+                           || atoms[i] == type_popup
+                        ) {
+                    char *atomValue = XGetAtomName(display_, atoms[i]);
+                    log("%s not normal window %lx \n", atomValue, window);
+                    XFree(atomName);
+                    return False;
+                }
+            }
+        }
+    }
+    XFree(propData);
+    return True;
+}
+
+bool WindowManager::isInFrameMap(long window ){
+    auto it = frames.find(window);
+    if (it != frames.end()) {
+        log("isInFrameMap %x", window);
+        return True;
+    }
+    return False;
+}
 
 void WindowManager::OnCreateNotify(const XCreateWindowEvent& e) {}
 
@@ -171,7 +209,13 @@ void WindowManager::OnDestroyNotify(const XDestroyWindowEvent& e) {
 
 void WindowManager::OnReparentNotify(const XReparentEvent& e) {}
 
-void WindowManager::OnMapNotify(const XMapEvent& e) {}
+void WindowManager::OnMapNotify(const XMapEvent &e) {
+    if(e.event == root_ && support_composite){
+        XCompositeNameWindowPixmap(display_, e.window);
+        named_windows.insert(e.window);
+        XSync(display_, False);
+    }
+}
 
 void WindowManager::OnUnmapNotify(const XUnmapEvent& e) {
     // If the window is a client window we manage, unframe it upon UnmapNotify. We
@@ -181,7 +225,6 @@ void WindowManager::OnUnmapNotify(const XUnmapEvent& e) {
         log("Ignore UnmapNotify for non-client window %lu",e.window);
         return;
     }
-
     // Ignore event if it is triggered by reparenting a window that was mapped
     // before the window manager started.
     //
@@ -195,8 +238,7 @@ void WindowManager::OnUnmapNotify(const XUnmapEvent& e) {
         log("Ignore UnmapNotify for reparented pre-existing window %lu", e.window);
         return;
     }
-
-    Unframe(e.window);
+//    Unframe(e.window);
 }
 
 void WindowManager::Unframe(Window w) {
@@ -204,59 +246,74 @@ void WindowManager::Unframe(Window w) {
     log("Unframe %x", w);
     // We reverse the steps taken in Frame().
     const Window frame = clients_[w];
+    unsigned long serial = NextRequest(display_);
+    log(" serial1:%ld", serial);
     // 1. Unmap frame.
     XUnmapWindow(display_, frame);
+    serial = NextRequest(display_);
+    log(" serial2:%ld", serial);
     // 2. Reparent client window.
     XReparentWindow(
             display_,
             w,
             root_,
             0, 0);  // Offset of client window within root.
+    serial = NextRequest(display_);
+    log(" serial3:%ld", serial);
     // 3. Remove client window from save set, as it is now unrelated to us.
     XRemoveFromSaveSet(display_, w);
+    serial = NextRequest(display_);
+    log(" serial4:%ld", serial);
     // 4. Destroy frame.
     XDestroyWindow(display_, frame);
+    serial = NextRequest(display_);
+    log(" serial5:%ld", serial);
     // 5. Drop reference to frame handle.
     clients_.erase(w);
-
-    log("Unframed window %lu frame %lu" , w , frame);
+    log("Unframed window %lu frame %x" , w , frame);
 }
 
 void WindowManager::OnConfigureNotify(const XConfigureEvent& e) {
-    auto it = frames.find(e.window);
-    if (it != frames.end()) {
-        XCompositeNameWindowPixmap(display_, e.window);
-        named_windows.insert(e.window);
+//    log("OnConfigureNotify window:%lx above:%lx", e.window, e.above);
+    if(clients_.count(e.above)){
+//        log("OnConfigureNotify %lx", e.window);
+        configedTopWindow[e.window] = e;
     }
-    XSync(display_, False);
 }
 
 void WindowManager::OnMapRequest(const XMapRequestEvent& e) {
     // 1. Frame or re-frame window.
-    Frame(e.window, false);
+//    Frame(e.window, false);
     // 2. Actually map window.
     XMapWindow(display_, e.window);
+
 }
 
 void WindowManager::OnConfigureRequest(const XConfigureRequestEvent& e) {
     XWindowChanges changes;
+    bool normal = isNormalWindow(e.window);
     changes.x = e.x;
-    changes.y = e.y;
+    changes.y = (e.y < DECORCATIONVIEW_HEIGHT && normal) ? DECORCATIONVIEW_HEIGHT : e.y;
     changes.width = e.width;
     changes.height = e.height;
     changes.border_width = e.border_width;
     changes.sibling = e.above;
     changes.stack_mode = e.detail;
+    unsigned long value_mask = e.value_mask;
+    log("value_mask : %lu", value_mask);
+    if(e.y < DECORCATIONVIEW_HEIGHT) {
+        value_mask  = e.value_mask | (1 << 1);
+    }
     if (clients_.count(e.window)) {
         const Window frame = clients_[e.window];
-        XConfigureWindow(display_, frame, e.value_mask, &changes);
-        log("Resize %lu  to %s ", frame, Size<int>(e.width, e.height).ToString().c_str());
+        XConfigureWindow(display_, frame, value_mask, &changes);
+        log("Resize_ frame %lx  to %s x.y %s value_mask:%lu " , frame, Size<int>(e.width, e.height).ToString().c_str()
+        ,Size<int>(changes.x, changes.y).ToString().c_str(), value_mask);
+    } else {
+        XConfigureWindow(display_, e.window, value_mask, &changes);
+        log("Resize_ %lx to %s x.y %s value_mask:%lu " , e.window , Size<int>(e.width, e.height).ToString().c_str()
+        ,Size<int>(changes.x, changes.y).ToString().c_str(), value_mask);
     }
-    XConfigureWindow(display_, e.window, e.value_mask, &changes);
-    log("Resize %lu to %s" , e.window , Size<int>(e.width, e.height).ToString().c_str());
-
-//    XCompositeRedirectSubwindows (display_, root_, CompositeRedirectAutomatic);
-//    XCompositeNameWindowPixmap(display_, frame_window);
     XSync(display_, False);
 
 }
@@ -374,16 +431,21 @@ void WindowManager::OnKeyPress(const XKeyEvent& e) {
 
 void WindowManager::OnKeyRelease(const XKeyEvent& e) {}
 
+void WindowManager::OnPropertyNotify(XEvent e) {}
+
 int WindowManager::OnXError(Display* display, XErrorEvent* e) {
     const int MAX_ERROR_TEXT_LENGTH = 1024;
     char error_text[MAX_ERROR_TEXT_LENGTH];
     XGetErrorText(display, e->error_code, error_text, sizeof(error_text));
     log("Received X error:\n");
     log("    Request: %d", int(e->request_code));
-    log(" - %s \n", XRequestCodeToString(e->request_code).c_str());
+    if(e->request_code < 120){
+        log(" - %s \n", XRequestCodeToString(e->request_code).c_str());
+    }
     log("    Error code %d: " , int(e->error_code));
     log(" - %s \n", error_text );
-    log("    Resource ID: %d",e->resourceid);
+    log("    Resource ID: %x",e->resourceid);
+    log("    serial ID: %ld",e->serial);
     return 0;
 
 }
@@ -395,13 +457,12 @@ void WindowManager::Run() {
 
     {
         ::std::lock_guard<mutex> lock(wm_detected_mutex_);
-
         wm_detected_ = false;
         XSetErrorHandler(&WindowManager::OnWMDetected);
         XSelectInput(
                 display_,
                 root_,
-                SubstructureRedirectMask | SubstructureNotifyMask);
+                BASE_EVENT_MASK);
         XSync(display_, false);
         int composite_major = 0, composite_minor = 0;
         XCompositeQueryVersion(display_, &composite_major, &composite_minor);
@@ -412,7 +473,7 @@ void WindowManager::Run() {
         }
         if (wm_detected_) {
             log("Detected another window manager on display %s "
-                       ,XDisplayString(display_));
+            ,XDisplayString(display_));
             return;
         }
     }
@@ -436,20 +497,26 @@ void WindowManager::Run() {
     //     ii. Frame each top-level window.
     for (unsigned int i = 0; i < num_top_level_windows; ++i) {
         log("top_level_window %x to frame", top_level_windows[i]);
-        Frame(top_level_windows[i], true);
+//        Frame(top_level_windows[i], true);
     }
     //     iii. Free top-level window array.
     XFree(top_level_windows);
     //   e. Ungrab X server.
     XUngrabServer(display_);
 
+    owner = XCreateSimpleWindow(display_, root_, -10, -10, 1, 1, 0, 0, 0);
+    log("owner:%x", owner);
+    sel = XInternAtom(display_, "CLIPBOARD", False);
+//    utf8 = XInternAtom(display_, "UTF8_STRING", False);
+    XSetSelectionOwner(display_, sel, owner, CurrentTime);
+
     // 2. Main event loop.
     while (!stoped) {
         // 1. Get next event.
         XEvent e;
         XNextEvent(display_, &e);
-        log("-------------------Received event: %s",ToString(e).c_str());
-
+        log("------Received event: %s",ToString(e).c_str());
+//        log("type:%d", e.type);
         // 2. Dispatch event.
         switch (e.type) {
             case CreateNotify:
@@ -494,81 +561,178 @@ void WindowManager::Run() {
             case KeyRelease:
                 OnKeyRelease(e.xkey);
                 break;
+            case PropertyNotify:
+                OnPropertyNotify(e);
+                break;
+            case SelectionClear:
+                OnSelectionClear(e);
+                break;
+            case SelectionRequest:
+                OnSelectionRequest(e);
+                break;
             default:
+                break;
                 log("Ignored event");
         }
     }
 }
 
-int WindowManager::moveWindow(long ptr, int x, int y) {
-    ptr = frame_window;
-    Window returned_root, returned_parent;
-    Window* top_level_windows;
-    unsigned int num_top_level_windows;
-    XQueryTree(
-            display_,
-            root_,
-            &returned_root,
-            &returned_parent,
-            &top_level_windows,
-            &num_top_level_windows);
-    log("moveWindow %x %lu", ptr, ptr);
+
+void WindowManager::OnSelectionRequest(XEvent e) {
+    XSelectionRequestEvent *sev = (XSelectionRequestEvent*)&e.xselectionrequest;
+    log("OnSelectionRequest owner:%lx requestor:%lx ", sev->owner, sev->requestor);
+    if(sev->requestor == root_){
+        return;
+    }
+    sel = XInternAtom(display_, "CLIPBOARD", False);
+    utf8 = XInternAtom(display_, "UTF8_STRING", False);
+
+    Atom targets = XInternAtom(display_, "TARGETS", False);
+    if(sev->target == targets){
+        Atom types[2] = { targets, utf8 };
+        XChangeProperty(display_,
+                        sev->requestor,
+                        sev->property,
+                        XA_ATOM,
+                        32, PropModeReplace, (unsigned char *) types,
+                        (int) (sizeof(types) / sizeof(Atom))
+        );
+        XSelectionEvent ssev;
+        ssev.type = SelectionNotify;
+        ssev.requestor = sev->requestor;
+        ssev.selection = sev->selection;
+        ssev.target = sev->target;
+        ssev.property = sev->property;
+        ssev.time = sev->time;
+        XSendEvent(display_, sev->requestor, 0, NoEventMask, (XEvent *)&ssev);
+        XFlush(display_);
+    } else {
+        XSelectionEvent ssev;
+        time_t now_tm;
+        char *now, *an;
+        now_tm = time(NULL);
+        now = ctime(&now_tm);
+        an = XGetAtomName(display_, sev->property);
+        log("Sending data to window 0x%lx, property '%s'\n", sev->requestor, an);
+        if (an)
+            XFree(an);
+        XChangeProperty(display_, sev->requestor, sev->property, utf8, 8, PropModeReplace,
+                        (unsigned char *)cliptext, strlen(cliptext));
+        ssev.type = SelectionNotify;
+        ssev.requestor = sev->requestor;
+        ssev.selection = sev->selection;
+        ssev.target = sev->target;
+        ssev.property = sev->property;
+        ssev.time = sev->time;
+        XSendEvent(display_, sev->requestor, True, NoEventMask, (XEvent *)&ssev);
+        XFlush(display_);
+    }
+}
+
+void WindowManager::OnSelectionClear(XEvent e) {
+    sel = XInternAtom(display_, "CLIPBOARD", False);
+    utf8 = XInternAtom(display_, "UTF8_STRING", False);
+
+    char *result;
+    unsigned long ressize, restail;
+    int resbits;
+    Atom bufid = XInternAtom(display_, "CLIPBOARD", False),
+            fmtid = XInternAtom(display_, "UTF8_STRING", False),
+            propid = XInternAtom(display_, "XSEL_DATA", False),
+            incrid = XInternAtom(display_, "INCR", False);
+    XEvent event;
+    XConvertSelection(display_, bufid, fmtid, propid, owner, CurrentTime);
+    do {
+        XNextEvent(display_, &event);
+    } while (event.type != SelectionNotify || event.xselection.selection != bufid);
+
+    if (event.xselection.property)
+    {
+        XGetWindowProperty(display_, owner, propid, 0, LONG_MAX/4, False, AnyPropertyType,
+                           &fmtid, &resbits, &ressize, &restail, (unsigned char**)&result);
+        if (fmtid == incrid){
+            log("Buffer is too large and INCR reading is not implemented yet.\n");
+        } else {
+            cliptext = (char*)malloc(strlen(result) + 1);
+            if (cliptext != NULL) {
+                strcpy(cliptext, result);
+            }
+            log("%.*s \n", (int)ressize, result);
+        }
+        XFree(result);
+    }
+    log("OnSelectionClear:\n");
+    XSetSelectionOwner(display_, sel, owner, CurrentTime);
+}
+
+
+int WindowManager::moveWindow(long window, int x, int y) {
+    log("moveWindow %x: x:%d y:%d", window, x, y);
+    int ret = XMoveWindow(display_, window, x, y);
+    XSync(display_, False);
+    return ret;
+}
+
+int WindowManager::configureWindow(long window, int x, int y, int w, int h) {
+    log("configureWindow %x: x:%d y:%d w:%d h:%d", window, x, y, w, h);
+    XWindowChanges changes;
+    changes.x = x;
+    changes.y = y;
+    changes.width = w;
+    changes.height = h;
+    unsigned long value_mask = CWX | CWY | CWWidth | CWHeight ;
     int ret;
-//    for (unsigned int i = 0; i < num_top_level_windows; ++i) {
-//        ret = XMoveWindow(display_, top_level_windows[i], x, y);
-//    }
-    ret = XMoveWindow(display_, ptr, x, y);
+    if (isInFrameMap(window)) {
+        log("configureWindow_ frame %lx  to %s x.y %s value_mask:%lu ", window,
+            Size<int>(w, h).ToString().c_str(), Size<int>(changes.x, changes.y).ToString().c_str(),
+            value_mask);
+        ret = XConfigureWindow(display_, window, value_mask, &changes);
+        XSync(display_, False);
+    } else {
+        log("configureWindow_ %lx to %s x.y %s value_mask:%lu ", window,
+            Size<int>(w, h).ToString().c_str(), Size<int>(changes.x, changes.y).ToString().c_str(),
+            value_mask);
+        ret = XConfigureWindow(display_, window, value_mask, &changes);
+        XSync(display_, False);
+    }
+    return ret;
+}
+
+int WindowManager::resizeWindow(long window, int w, int h) {
+    log("resizeWindow %x w:%d h:%d", window, w, h);
+    int  ret = XResizeWindow(display_, window, w, h);
     XSync(display_, False);
     return ret;
 }
 
-int WindowManager::resizeWindow(long ptr, int x, int y) {
-    ptr = frame_window;
-    Window returned_root, returned_parent;
-    Window* top_level_windows;
-    unsigned int num_top_level_windows;
-    XQueryTree(
-            display_,
-            root_,
-            &returned_root,
-            &returned_parent,
-            &top_level_windows,
-            &num_top_level_windows);
-    log("resizeWindow %x %lu", ptr, ptr);
+int WindowManager::closeWindow(long window) {
+    Atom* supported;
+    int num_supported;
+    XGetWMProtocols(display_, window, &supported, &num_supported);
+    log("closeWindow window:%x supported:%d num_supported:%d", window, supported, num_supported);
     int ret;
-//    for (unsigned int i = 0; i < num_top_level_windows; ++i) {
-//     ret = XResizeWindow(display_, top_level_windows[i], x, y);
-//    }
-    ret = XResizeWindow(display_, ptr, x, y);
-    ret = XResizeWindow(display_, top_level_debug, x, y);
+    if(supported) {
+        log("closeWindow supported1");
+        XEvent msg;
+        memset(&msg, 0, sizeof(msg));
+        msg.xclient.type = ClientMessage;
+        msg.xclient.message_type = WM_PROTOCOLS;
+        msg.xclient.window = window;
+        msg.xclient.format = 32;
+        msg.xclient.data.l[0] = WM_DELETE_WINDOW;
+        ret = XSendEvent(display_, window, false, 0, &msg);
+    } else {
+        log("closeWindow not supported");
+        ret = XKillClient(display_, window);
+    }
     XSync(display_, False);
     return ret;
 }
 
-int WindowManager::closeWindow(long ptr) {
-    Window returned_root, returned_parent;
-    Window* top_level_windows;
-    unsigned int num_top_level_windows;
-    XQueryTree(
-            display_,
-            root_,
-            &returned_root,
-            &returned_parent,
-            &top_level_windows,
-            &num_top_level_windows);
-    ptr = top_level_debug;
-//    for (unsigned int i = 0; i < num_top_level_windows; ++i) {
-//    }
-    log("closeWindow %x %lu", ptr, ptr);
-    int ret = XKillClient(display_, ptr);
-    XSync(display_, False);
-    return ret;
-}
-
-int WindowManager::raiseWindow(long ptr) {
-    ptr = frame_window;
-    log("raiseWindow %x %lu", ptr, ptr);
-    int ret = XRaiseWindow(display_, frame_window);
+int WindowManager::raiseWindow(long window) {
+    log("raiseWindow %x", window);
+    int ret = XRaiseWindow(display_, window);
+    XSetInputFocus(display_, window, RevertToPointerRoot, CurrentTime);
     XSync(display_, False);
     return ret;
 }
@@ -577,3 +741,14 @@ void WindowManager::initCompositor() {
     XCompositeRedirectSubwindows(display_, root_, CompositeRedirectAutomatic);
     XSync(display_, false);
 }
+
+jint WindowManager::sendClipText(const char *string) {
+    cliptext = (char*)malloc(strlen(string) + 1);
+    if (cliptext != NULL) {
+        strcpy(cliptext, string);
+    }
+    return True;
+}
+
+
+

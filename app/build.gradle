@@ -7,9 +7,13 @@ android {
         applicationId "com.termux.x11"
         minSdkVersion 26
         targetSdkVersion 33
-        versionCode 14
-        versionName "1.03.00"
+        versionCode 2
+        versionName "1.0.2"
         buildConfigField "String", "COMMIT", "\"" + ("git rev-parse HEAD\n".execute().getText().trim() ?: (System.getenv('CURRENT_COMMIT') ?: "NO_COMMIT")) + "\""
+        manifestPlaceholders = [MainActivityMinHeight: "350dp",
+                                MainActivityMinWidth: "350dp",
+                                MainDialogMinHeight: "150dp",
+                                MainDialogMinWidth: "180dp"]
     }
 
 //    signingConfigs.debug {
@@ -18,7 +22,6 @@ android {
 //        storePassword 'xrj45yWGLbsO7W0v'
 //        keyPassword 'xrj45yWGLbsO7W0v'
 //    }
-
 
     splits.abi {
         enable true
@@ -40,16 +43,29 @@ android {
 //    packagingOptions.jniLibs.useLegacyPackaging false
     buildFeatures.aidl true
     buildFeatures.buildConfig true
-//    buildTypes.debug {
-//        signingConfig signingConfigs.debug
-//        postprocessing {
-//            removeUnusedCode true
-//            removeUnusedResources true
-//            obfuscate false
-//            optimizeCode true
+    buildTypes {
+//        release {
+//            minifyEnabled true
+//            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.txt'
+//            signingConfig signingConfigs.debug
+//        }
+//        release {
+//            applicationIdSuffix '.release'
+//            minifyEnabled false
+//        }
+//        debug {
+//            applicationIdSuffix '.debug'
+//            minifyEnabled false
+//        }
+    }
+
+//    android.applicationVariants.all { variant ->
+//        variant.outputs.all {
+//            if (outputFile != null && outputFileName.endsWith('.apk')) {
+//                outputFileName = "FDE_X11.apk"
+//            }
 //        }
 //    }
-
 
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_1_8
@@ -57,7 +73,22 @@ android {
     }
 }
 
+gradle.projectsEvaluated {
+    tasks.withType(JavaCompile) {
+        Set<File> fileSet = options.bootstrapClasspath.getFiles()
+        List<File> newFileList =  new ArrayList<>();
+        newFileList.add(new File("libs/framework.jar"))
+        newFileList.addAll(fileSet)
+        options.bootstrapClasspath = files(
+                newFileList.toArray()
+        )
+    }
+}
+
 dependencies {
+    compileOnly fileTree(include: ['*.jar'], dir: 'libs/compile')
+    implementation fileTree(include: ['*.jar'], dir: 'libs/impl')
+    compileOnly files('libs/framework.jar')
     //noinspection DifferentStdlibGradleVersion
     implementation 'androidx.lifecycle:lifecycle-viewmodel-ktx:2.3.0'
     implementation 'androidx.preference:preference:1.2.1'
@@ -70,11 +101,10 @@ dependencies {
     implementation 'androidx.swiperefreshlayout:swiperefreshlayout:1.1.0'
     implementation 'com.caverock:androidsvg:1.4'
     implementation 'io.github.razerdp:BasePopup:3.2.1'
-    implementation  'org.greenrobot:eventbus:3.2.0'
-
-
-    compileOnly project(':shell-loader:stub')
+    implementation 'org.greenrobot:eventbus:3.2.0'
+//    compileOnly project(':shell-loader:stub')
     implementation project(':x_recyclerview')
     implementation project(':fusionwindowmanager')
     implementation project(':dialogtiplib')
+    implementation project(':easy')
 }

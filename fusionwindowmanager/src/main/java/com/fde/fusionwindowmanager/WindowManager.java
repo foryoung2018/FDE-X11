@@ -5,6 +5,7 @@ import android.app.ActivityOptions;
 import android.app.Dialog;
 import android.content.Context;
 import android.content.Intent;
+import android.graphics.Bitmap;
 import android.graphics.Rect;
 import android.os.Handler;
 import android.os.HandlerThread;
@@ -15,6 +16,9 @@ import android.view.View;
 
 import androidx.annotation.NonNull;
 
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
 import java.lang.ref.WeakReference;
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -32,15 +36,17 @@ public class WindowManager implements AWindowManagerInterface {
     }
 
     HandlerThread mThread;
-    Handler mHandler;
+    static Handler mHandler;
 
-    private WeakReference<Context> contextReference;
+    private static WeakReference<Context> contextReference;
     public static boolean isConnected;
     public static final float DECORCATIONVIEW_HEIGHT = 42;
     public static final int MSG_START_WM = 1;
     public static final int MSG_STOP_WM = 2;
     public static List<WindowAttribute> PERFORM_WINDOW_LIST = new ArrayList<>();
     public Set<Long> WINDOW_XIDS = new HashSet<>();
+    private String display;
+
     public WindowManager() {
         mThread = new HandlerThread("WM");
         mThread.start();
@@ -48,9 +54,6 @@ public class WindowManager implements AWindowManagerInterface {
     }
 
     public WindowManager(WeakReference<Context> activityWeakReference) {
-        Log.d(TAG, "WindowManager: activityWeakReference:" + activityWeakReference + "");
-
-        Log.d(TAG, "WindowManager : activityWeakReference:" + activityWeakReference + "");
         this.contextReference = activityWeakReference;
         mThread = new HandlerThread("WM");
         mThread.start();
@@ -58,8 +61,8 @@ public class WindowManager implements AWindowManagerInterface {
     }
 
 
-    public void startWindowManager() {
-        Log.d(TAG, "startWindowManager() called");
+    public void startWindowManager(String displayGlobalParam) {
+        this.display = displayGlobalParam;
         Message msg = Message.obtain();
         msg.what = MSG_START_WM;
         mHandler.sendMessage(msg);
@@ -79,17 +82,49 @@ public class WindowManager implements AWindowManagerInterface {
      */
     public native void createXWindow();
 
-    public static native int connect2Server();
+    public static native int connect2Server(String display);
 
-    public native int moveWindow(long winPtr, int x, int y);
+    public native int configureWindow(long window, int x, int y, int width, int height);
 
-    public native int resizeWindow(long winPtr, int width, int height);
+    public native int moveWindow(long window, int x, int y);
 
-    public native int closeWindow(long winPtr);
+    public native int resizeWindow(long window, int width, int height);
 
-    public native int raiseWindow(long winPtr);
+    public native int closeWindow(long window);
+    public native int raiseWindow(long window);
 
+    public native int sendClipText(String cliptext);
     public native int disconnect2Server();
+
+    public static void  getWindowIconFromManager(Bitmap bitmap, long window){
+        Log.d(TAG, "getWindowIconFromManager: bitmap:" + bitmap + ", window:" + window + "");
+        Context context = contextReference.get();
+        if(context == null){
+            Log.d(TAG, "context  == null ");
+            return;
+        }
+        Log.d(TAG, "post getWindowIconFromManager: bitmap:" + bitmap.getWidth() + "x" + bitmap.getHeight() + ", window:" + window + "");
+        String targetPackage = "com.termux.x11";
+        Intent intent = new Intent("UPDATE_ICON");
+        intent.setPackage(targetPackage);
+        intent.putExtra("window_id", window);
+        intent.putExtra("window_icon", bitmap);
+        context.sendStickyBroadcast(intent);
+        String path = "/sdcard/Download/bitmap.png";
+        Log.d(TAG, "getWindowIconFromManager: path = " + path);
+        saveBitmapToFile(bitmap, path);
+
+
+    }
+
+    public static void saveBitmapToFile(Bitmap bitmap, String filePath) {
+        File file = new File(filePath);
+        try (FileOutputStream out = new FileOutputStream(file)) {
+            bitmap.compress(Bitmap.CompressFormat.PNG, 100, out);
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
 
 
     @Override
@@ -155,7 +190,7 @@ public class WindowManager implements AWindowManagerInterface {
             super.handleMessage(msg);
             switch (msg.what) {
                 case MSG_START_WM:
-                    isConnected = connect2Server() > 0;
+                    isConnected = connect2Server(display) > 0;
                     Log.d(TAG, "MSG_START_WM isConnected:" + isConnected);
                     break;
                 default:

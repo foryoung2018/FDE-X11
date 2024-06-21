@@ -1,11 +1,13 @@
 package com.fde.fusionwindowmanager.eventbus;
 
+import com.fde.fusionwindowmanager.Property;
 import com.fde.fusionwindowmanager.WindowAttribute;
 
 public class EventMessage {
 
 
     private WindowAttribute windowAttribute;
+    private Property property;
 
     private EventType type;
     private String message;
@@ -14,6 +16,21 @@ public class EventMessage {
         this.type = type;
         this.message = message;
         this.windowAttribute = windowAttribute;
+    }
+
+    public EventMessage(EventType type, String message, WindowAttribute windowAttribute, Property property) {
+        this.type = type;
+        this.message = message;
+        this.windowAttribute = windowAttribute;
+        this.property = property;
+    }
+
+    public Property getProperty() {
+        return property;
+    }
+
+    public void setProperty(Property property) {
+        this.property = property;
     }
 
     public EventType getType() {
@@ -42,6 +59,11 @@ public class EventMessage {
 
     @Override
     public String toString() {
-        return "type=" + type + "--message= " + message + "--windowAttribute= " + windowAttribute;
+        return "EventMessage{" +
+                "windowAttribute=" + windowAttribute +
+                ", property=" + property +
+                ", type=" + type +
+                ", message='" + message + '\'' +
+                '}';
     }
 }

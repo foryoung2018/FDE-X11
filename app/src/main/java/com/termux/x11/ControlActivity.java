@@ -1,18 +1,22 @@
 package com.termux.x11;
 
+import static com.termux.x11.data.Constants.DISPLAY_GLOBAL_PARAM;
+
 import android.app.Activity;
+import android.content.ComponentName;
 import android.content.Intent;
+import android.content.ServiceConnection;
 import android.graphics.Rect;
 import android.os.Bundle;
+import android.os.IBinder;
+import android.os.RemoteException;
 import android.util.Log;
 import android.view.View;
 import android.app.ActivityOptions;
 import android.widget.Button;
 import androidx.annotation.Nullable;
 
-import com.fde.fusionwindowmanager.fusionview.FusionActivity;
 import com.fde.fusionwindowmanager.WindowManager;
-import com.fde.fusionwindowmanager.service.WMService;
 import com.fde.fusionwindowmanager.service.WMServiceConnection;
 import com.termux.x11.utils.Util;
 
@@ -21,11 +25,11 @@ public class ControlActivity extends Activity implements View.OnClickListener {
     private static final int DECORCATIONVIEW_HEIGHT = 42;
     private Button btCreateWindow, btstartXserver,
             btStartScreen, btBindWindowManager,
-            btCreateFromWM, btMoveNative, btResizeNative, btCloseWindowNative, btRaiseNative,
+            btCreateFromWM, btMoveNative, btResizeNative, btCloseWindowNative, btRaiseNative, btConfigureNative,
             btStopWindowManager;
     private WMServiceConnection connection;
     private WindowManager windowManager;
-
+    public ICmdEntryInterface service;
     @Override
     protected void onCreate(@Nullable Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -38,9 +42,9 @@ public class ControlActivity extends Activity implements View.OnClickListener {
         btResizeNative = findViewById(R.id.button_resize);
         btCloseWindowNative = findViewById(R.id.button_closewindow);
         btRaiseNative = findViewById(R.id.button_raisewindow);
+        btConfigureNative = findViewById(R.id.button_configure);
         btStopWindowManager = findViewById(R.id.button_stopwm);
         btstartXserver = findViewById(R.id.button_startServer);
-
         btCreateWindow.setOnClickListener(this);
         btStartScreen.setOnClickListener(this);
         btBindWindowManager.setOnClickListener(this);
@@ -51,16 +55,23 @@ public class ControlActivity extends Activity implements View.OnClickListener {
         btRaiseNative.setOnClickListener(this);
         btStopWindowManager.setOnClickListener(this);
         btstartXserver.setOnClickListener(this);
-
+        btConfigureNative.setOnClickListener(this);
         Util.copyAssetsToFiles(this, "xkb", "xkb");
+//        if(connection == null ){
+//            connection = new WMServiceConnection();
+//        }
+        Intent intent = new Intent(this, XWindowService.class);
+        bindService(intent, new ServiceConnection() {
+            @Override
+            public void onServiceConnected(ComponentName name, IBinder s) {
+                service = ICmdEntryInterface.Stub.asInterface(s);
+            }
 
-        if(connection == null ){
-            connection = new WMServiceConnection();
-        }
+            @Override
+            public void onServiceDisconnected(ComponentName name) {
 
-        Intent intent = new Intent(this, WMService.class);
-        bindService(intent, connection, BIND_AUTO_CREATE);
-        windowManager = new WindowManager();
+            }
+        }, BIND_AUTO_CREATE);
     }
 
     @Override
@@ -71,25 +82,40 @@ public class ControlActivity extends Activity implements View.OnClickListener {
             startActivityForXserver(0, 0 , 1920, 989, 0 , 0);
 //            startActivityForXserver(0, 0 , 960, 720, 0 , 0);
         } else if( v == btBindWindowManager){
-            windowManager.startWindowManager();
+            windowManager.startWindowManager(DISPLAY_GLOBAL_PARAM);
         } else if ( v == btCreateFromWM){
             connection.startActivityForXserver(0, 0 , 300, 600, 0 , 0);
         } else if ( v == btMoveNative){
             int ret = windowManager.moveWindow(1000, 50, 50);
             Log.d("TAG", "moveWindow: ret = [" + ret + "]");
         } else if ( v == btResizeNative){
-            int ret = windowManager.resizeWindow(1000, 800, 600);
-            Log.d("TAG", "resizeWindow: ret = [" + ret + "]");
+            try {
+                service.resizeWindow(1000, 800, 600);
+            } catch (RemoteException e) {
+                throw new RuntimeException(e);
+            }
         } else if ( v == btCloseWindowNative){
-            int ret = windowManager.closeWindow(1000);
-            Log.d("TAG", "closeWindow: ret = [" + ret + "]");
+            try {
+                service.closeWindow(1000, 100, 100);
+            } catch (RemoteException e) {
+                throw new RuntimeException(e);
+            }
         } else if ( v == btRaiseNative){
-            int ret = windowManager.raiseWindow(1000);
-            Log.d("TAG", "raiseWindow: ret = [" + ret + "]");
+            try {
+                service.raiseWindow(2097153);
+            } catch (RemoteException e) {
+                throw new RuntimeException(e);
+            }
+        } else if ( v == btConfigureNative){
+            try {
+                service.configureWindow(0x000001, 0x200001, 200, 200, 300, 300);
+            } catch (RemoteException e) {
+                throw new RuntimeException(e);
+            }
         } else if ( v == btStopWindowManager){
             windowManager.stopWindowManager();
         } else if ( v == btstartXserver){
-            CmdEntryPoint.main(new String[]{":1", "-legacy-drawing", "-listen", "tcp"});
+            Xserver.getInstance().startXserver();
         }
     }
 

@@ -6,37 +6,79 @@
 #define TERMUX_X11_WINDOW_MANAGER_H
 #include "X11/Xlib.h"
 #include "X11/X.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include "X11/Xutil.h"
 #include <memory>
 #include <mutex>
 #include <string>
 #include <unordered_map>
 #include "util.hpp"
 #include <android/log.h>
-#define log(...) __android_log_print(ANDROID_LOG_DEBUG, "huyang_wm", __VA_ARGS__)
+#include <set>
+#include <jni.h>
+//#include "ewmh_icccm.h"
+#include <X11/Xatom.h>
+
+#define DECORCATIONVIEW_HEIGHT 42
+#define BASE_EVENT_MASK \
+    SubstructureNotifyMask|\
+    StructureNotifyMask|\
+    SubstructureRedirectMask|\
+    ButtonPressMask|\
+    ButtonReleaseMask|\
+    KeyPressMask|\
+    KeyReleaseMask|\
+    FocusChangeMask|\
+    PropertyChangeMask|\
+    ColormapChangeMask
+
+#define PRINT_LOG 0
+#define log(...) if(PRINT_LOG){\
+                __android_log_print(ANDROID_LOG_DEBUG, "huyang_wm", __VA_ARGS__);\
+                }              \
+
+#define loge(...) if(PRINT_LOG){\
+                __android_log_print(ANDROID_LOG_ERROR, "huyang_wm", __VA_ARGS__);\
+                }              \
+
 #define CHECK(condition)  \
       if(condition){     \
-          log("#condition fatal");                \
+          log("#condition fatal"); \
       }
 #define CHECK_EQ(val1, val2)  \
       if(val1 != val2){     \
           log("not equal");                \
       }
-#define HAVE_COMPOSITOR 1
 
-
+const Atom _NET_WM_WINDOW_TYPE = 267;
+const Atom _NET_WM_WINDOW_TYPE_COMBO = 268;
+const Atom _NET_WM_WINDOW_TYPE_DIALOG = 269;
+const Atom _NET_WM_WINDOW_TYPE_DND = 270;
+const Atom _NET_WM_WINDOW_TYPE_DROPDOWN_MENU = 271;
+const Atom _NET_WM_WINDOW_TYPE_MENU = 272;
+const Atom _NET_WM_WINDOW_TYPE_NORMAL = 273;
+const Atom _NET_WM_WINDOW_TYPE_POPUP_MENU = 274;
+const Atom _NET_WM_WINDOW_TYPE_TOOLTIP = 275;
+const Atom _NET_WM_WINDOW_TYPE_UTILITY = 276;
 
 class WindowManager  {
 public:
-    static ::WindowManager* create();
+    static ::WindowManager *create(const char *string, JNIEnv *env, jclass cls);
     ~WindowManager();
     WindowManager(Display *display);
     void Run();
-    int moveWindow(long ptr, int x, int y);
-    int resizeWindow(long ptr, int x, int y);
-    int closeWindow(long ptr);
-    int raiseWindow(long ptr);
+    int configureWindow(long window, int x, int y, int w, int h);
+    int moveWindow(long window, int x, int y);
+    int resizeWindow(long window, int x, int y);
+    int closeWindow(long window);
+    int raiseWindow(long window);
+    bool isNormalWindow(long window);
+    bool isInFrameMap(long window);
     void initCompositor();
     int stoped = False;
+    jint sendClipText(const char *pJstring);
 
 private:
 
@@ -92,9 +134,24 @@ private:
     // The size of the affected window at the start of a window move/resize.
     Size<int> drag_start_frame_size_;
 
+    std::set<Window> window_under_frames;
+    std::set<Window> frames;
+    std::set<Window> named_windows;
+
+    ::std::unordered_map<Window, XConfigureEvent> configedTopWindow;
+    Window owner;
+    Atom sel, utf8;
+    char * cliptext;
+
     // Atom constants.
     const Atom WM_PROTOCOLS;
     const Atom WM_DELETE_WINDOW;
+
+    void OnPropertyNotify(XEvent event);
+
+    void OnSelectionClear(XEvent event);
+
+    void OnSelectionRequest(XEvent event);
 };
 
 

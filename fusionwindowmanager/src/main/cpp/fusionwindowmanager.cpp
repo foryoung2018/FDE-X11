@@ -6,6 +6,11 @@
 #include "include/window_manager.h"
 #define log(...) __android_log_print(ANDROID_LOG_DEBUG, "huyang_native", __VA_ARGS__)
 WindowManager *window_manager;
+extern JavaVM *jniVM;
+extern JNIEnv *GlobalEnv;
+extern jobject bitmap;
+extern jclass staticClass;
+
 
 JNIEXPORT void JNICALL createXWindow(JNIEnv * env, jobject obj)
 {
@@ -52,9 +57,12 @@ JNIEXPORT void JNICALL createXWindow(JNIEnv * env, jobject obj)
     }
 }
 
-JNIEXPORT jint JNICALL connect2Server(JNIEnv * env, jobject obj){
-    setenv("DISPLAY", ":0", 1);
-    window_manager = WindowManager::create();
+JNIEXPORT jint JNICALL connect2Server(JNIEnv * env, jobject obj, jstring display){
+    jboolean isCopy = false;
+    const char* export_display = env->GetStringUTFChars(display, &isCopy);
+    jclass js  = static_cast<jclass>(env->NewGlobalRef(obj));
+    setenv("DISPLAY", export_display, 1);
+    window_manager = WindowManager::create(export_display, env, js);
     if(!window_manager){
         log("Failed to initialize window manager.");
         return False;
@@ -71,6 +79,14 @@ JNIEXPORT jint JNICALL moveWindow(JNIEnv * env, jobject obj, jlong ptr, jint x, 
     return window_manager->moveWindow(ptr, x, y);
 }
 
+JNIEXPORT jint JNICALL configureWindow(JNIEnv * env, jobject obj, jlong wid, jint x, jint y, jint w, jint h){
+    if(!window_manager){
+        log("Failed to initialize window manager.");
+        return False;
+    }
+    return window_manager->configureWindow(wid, x, y, w, h);
+}
+
 JNIEXPORT jint JNICALL resizeWindow(JNIEnv * env, jobject obj, jlong ptr, jint x, jint y){
     if(!window_manager){
         log("Failed to initialize window manager.");
@@ -79,12 +95,12 @@ JNIEXPORT jint JNICALL resizeWindow(JNIEnv * env, jobject obj, jlong ptr, jint x
     return window_manager->resizeWindow(ptr, x, y);
 }
 
-JNIEXPORT jint JNICALL closeWindow(JNIEnv * env, jobject obj, jlong ptr){
+JNIEXPORT jint JNICALL closeWindow(JNIEnv * env, jobject obj, jlong xid){
     if(!window_manager){
         log("Failed to initialize window manager.");
         return False;
     }
-    return window_manager->closeWindow(ptr);
+    return window_manager->closeWindow(xid);
 }
 
 JNIEXPORT jint JNICALL raiseWindow(JNIEnv * env, jobject obj, jlong ptr){
@@ -93,6 +109,16 @@ JNIEXPORT jint JNICALL raiseWindow(JNIEnv * env, jobject obj, jlong ptr){
         return False;
     }
     return window_manager->raiseWindow(ptr);
+}
+
+JNIEXPORT jint JNICALL sendClipText(JNIEnv * env, jobject obj, jstring string){
+    if(!window_manager){
+        log("Failed to initialize window manager.");
+        return False;
+    }
+    jboolean isCopy = false;
+    const char* cliptext = env->GetStringUTFChars(string, &isCopy);
+    return window_manager->sendClipText(cliptext);
 }
 
 JNIEXPORT jint JNICALL disconnect2Server(JNIEnv * env, jobject obj){
@@ -107,13 +133,14 @@ JNIEXPORT jint JNICALL disconnect2Server(JNIEnv * env, jobject obj){
 
 static JNINativeMethod method_table[] = {
         {"createXWindow","()V", (void *) createXWindow},
-        {"connect2Server","()I", (void *) connect2Server},
+        {"connect2Server", "(Ljava/lang/String;)I", (void *) connect2Server},
         {"moveWindow","(JII)I", (void *) moveWindow},
+        {"configureWindow","(JIIII)I", (void *) configureWindow},
         {"resizeWindow","(JII)I", (void *) resizeWindow},
         {"closeWindow","(J)I", (void *) closeWindow},
         {"raiseWindow","(J)I", (void *) raiseWindow},
+        {"sendClipText","(Ljava/lang/String;)I", (void *) sendClipText},
         {"disconnect2Server","()I", (void *) disconnect2Server},
-
 };
 
 
@@ -124,11 +151,9 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void *reserved){
         if (clazz == NULL){
             return JNI_ERR;
         }
-
         if (env->RegisterNatives(clazz, method_table, sizeof(method_table)/ sizeof(method_table[0]))==JNI_OK) {
             return JNI_VERSION_1_6;
         }
     }
-
     return JNI_ERR;
 }

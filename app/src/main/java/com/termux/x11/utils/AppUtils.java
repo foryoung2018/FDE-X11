@@ -54,6 +54,8 @@ public class AppUtils {
     private static AlertDialog alertDialog;
     private static final String CLASS_NAME = "android.os.SystemProperties";
 
+    public static int GLOBAL_SCREEN_WIDTH = 1920;
+    public static int GLOBAL_SCREEN_HEIGHT = 1080;
     private static Context mContext;
     private static Thread mUiThread;
 
@@ -64,6 +66,18 @@ public class AppUtils {
         mContext = context;
         mUiThread = Thread.currentThread();
     }
+
+    public static void set(String key, String defaultValue) {
+        try {
+            final Class<?> systemProperties = Class.forName("android.os.SystemProperties");
+            final Method set = systemProperties.getMethod("set", String.class, String.class);
+            set.invoke(null, key, defaultValue);
+            Log.d(TAG,"set " + key + " " + defaultValue);
+        } catch (Exception e) {
+            Log.e(TAG, "Exception while setting system property: ", e);
+        }
+    }
+
 
     public static Context getAppContext()
     {
@@ -112,7 +126,7 @@ public class AppUtils {
         if (Constants.SURFFIX_SVG.equals(iconType) || Constants.SURFFIX_SVGZ.equals(iconType)) {
             byte[] decodedData = Base64.decode(imageStr, Base64.DEFAULT);
             FileOutputStream svgFile = null;
-            File file = new File(App.getApp().getFilesDir(), name + "_output.svg");
+            File file = new File(context.getFilesDir(), name + "_output.svg");
             try {
                 svgFile = new FileOutputStream(file.getAbsolutePath());
                 svgFile.write(decodedData);

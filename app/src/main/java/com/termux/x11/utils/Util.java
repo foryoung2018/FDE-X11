@@ -4,11 +4,15 @@ import android.app.ActivityOptions;
 import android.content.Context;
 import android.content.Intent;
 import android.content.res.AssetManager;
+import android.graphics.Bitmap;
 import android.graphics.Rect;
 import android.os.Bundle;
 import android.util.Log;
+import android.widget.Toast;
 
-import com.termux.x11.MainActivity1;
+import com.termux.x11.AppListActivity;
+import com.termux.x11.MainActivity;
+import com.termux.x11.R;
 
 import java.io.Closeable;
 import java.io.File;
@@ -17,10 +21,12 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.util.HashMap;
 
 public class Util {
     private static final String TAG = "Util";
+    private static final int BITMAP_SIZE_LIMIT = 360;
     private static Context baseContext;
 
     public static void setBaseContext(Context context){
@@ -46,7 +52,7 @@ public class Util {
 
     public static void startActivityForWindow(long windowPtr) {
         Log.d(TAG, "startActivityForWindow() called with: windowPtr = [" + windowPtr + "]");
-        Intent intent = new Intent(baseContext, MainActivity1.class);
+        Intent intent = new Intent(baseContext, MainActivity.MainActivity1.class);
         intent.putExtra("KEY_WindowPtr", windowPtr);
         intent.setFlags(Intent.FLAG_ACTIVITY_LAUNCH_ADJACENT | Intent.FLAG_ACTIVITY_NEW_TASK);
         baseContext.startActivity(intent);
@@ -129,6 +135,17 @@ public class Util {
         }
     }
 
+    public static void set(String key, String defaultValue) {
+        try {
+            final Class<?> systemProperties = Class.forName("android.os.SystemProperties");
+            final Method set = systemProperties.getMethod("set", String.class, String.class);
+            set.invoke(null, key, defaultValue);
+            Log.d(TAG,"set " + key + " " + defaultValue);
+        } catch (Exception e) {
+            Log.e(TAG, "Exception while setting system property: ", e);
+        }
+    }
+
     public static Class<?> getClassByName(String name) {
         Class<?> xwindowActivityClass = null;
         try {
@@ -137,5 +154,28 @@ public class Util {
             e.printStackTrace();
         }
         return xwindowActivityClass;
+    }
+
+    public static Bitmap scaleBitmapIfneed(Bitmap bitmap) {
+        if(bitmap == null || bitmap.getWidth() < BITMAP_SIZE_LIMIT || bitmap.getHeight() < BITMAP_SIZE_LIMIT) {
+            return bitmap;
+        }
+        return Bitmap.createScaledBitmap(bitmap, BITMAP_SIZE_LIMIT, BITMAP_SIZE_LIMIT, true);
+    }
+
+    public static void showXserverStartSuccess(Context context) {
+        Toast.makeText(context, R.string.xserver_start_success, Toast.LENGTH_SHORT).show();
+    }
+
+    public static void showXserverConnectSuccess(Context context) {
+        Toast.makeText(context, R.string.xserver_connect_success, Toast.LENGTH_SHORT).show();
+    }
+
+    public static void showXserverDisconnect(Context context) {
+        Toast.makeText(context, R.string.xserver_disconnect, Toast.LENGTH_SHORT).show();
+    }
+
+    public static void showXserverReconnect(Context context) {
+        Toast.makeText(context, R.string.xserver_reconnect, Toast.LENGTH_SHORT).show();
     }
 }

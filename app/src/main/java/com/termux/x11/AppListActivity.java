@@ -1,65 +1,85 @@
 package com.termux.x11;
 
-import static com.termux.x11.CmdEntryPoint.ACTION_START;
+import static android.view.WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
 import static com.termux.x11.LoriePreferences.ACTION_PREFERENCES_CHANGED;
+import static com.termux.x11.MainActivity.ACTION_STOP;
+import static com.termux.x11.XWindowService.ACTION_X_WINDOW_ATTRIBUTE;
+import static com.termux.x11.XWindowService.ACTION_X_WINDOW_PROPERTY;
+import static com.termux.x11.XWindowService.DESTROY_ACTIVITY_FROM_X;
+import static com.termux.x11.XWindowService.MODALED_ACTION_ACTIVITY_FROM_X;
+import static com.termux.x11.XWindowService.START_ACTIVITY_FROM_X;
+import static com.termux.x11.XWindowService.STOP_WINDOW_FROM_X;
+import static com.termux.x11.XWindowService.UNMODALED_ACTION_ACTIVITY_FROM_X;
+import static com.termux.x11.XWindowService.X_WINDOW_ATTRIBUTE;
+import static com.termux.x11.Xserver.ACTION_START;
+import static com.termux.x11.Xserver.ACTION_UPDATE_ICON;
 import static com.termux.x11.data.Constants.BASEURL;
+import static com.termux.x11.data.Constants.DISPLAY_GLOBAL_PARAM;
 import static com.termux.x11.data.Constants.URL_GETALLAPP;
-import static com.termux.x11.data.Constants.URL_STOPAPP;
+import static com.termux.x11.data.Constants.URL_STARTAPP_X;
+import static com.termux.x11.utils.Util.showXserverConnectSuccess;
+import static com.termux.x11.utils.Util.showXserverDisconnect;
+import static com.termux.x11.utils.Util.showXserverReconnect;
+import static com.termux.x11.utils.Util.showXserverStartSuccess;
 
+import android.annotation.SuppressLint;
+import android.app.ActivityManager;
 import android.app.ActivityOptions;
-import android.app.Dialog;
 import android.app.PendingIntent;
 import android.content.BroadcastReceiver;
+import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.ServiceConnection;
 import android.content.pm.ShortcutInfo;
 import android.content.pm.ShortcutManager;
 import android.content.res.Configuration;
+import android.graphics.Bitmap;
 import android.graphics.Rect;
 import android.graphics.drawable.Icon;
 import android.os.Bundle;
 import android.os.Handler;
+import android.os.IBinder;
+import android.os.RemoteException;
 import android.text.TextUtils;
 import android.util.Base64;
 import android.util.Log;
 import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
+import android.view.ViewGroup;
 import android.view.ViewTreeObserver;
+import android.view.Window;
+import android.view.WindowManager;
+import android.view.WindowMetrics;
 import android.view.animation.Animation;
 import android.view.animation.DecelerateInterpolator;
 import android.view.animation.TranslateAnimation;
 import android.widget.ProgressBar;
+import android.widget.Toast;
+
 import androidx.annotation.Nullable;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.recyclerview.widget.GridLayoutManager;
 import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
 
-import com.fde.fusionwindowmanager.WindowManager;
-import com.fde.fusionwindowmanager.eventbus.EventType;
-import com.fde.fusionwindowmanager.service.WMService;
-import com.fde.fusionwindowmanager.service.WMServiceConnection;
+import com.fde.fusionwindowmanager.Property;
 import com.fde.fusionwindowmanager.Util;
+import com.fde.fusionwindowmanager.WindowAttribute;
 import com.fde.recyclerview.SwipeRecyclerView;
 import com.termux.x11.data.AppAdapter;
 import com.termux.x11.data.AppListResult;
 import com.termux.x11.data.VncResult;
-import com.fde.fusionwindowmanager.eventbus.EventMessage;
 import com.termux.x11.utils.AppUtils;
 import com.termux.x11.utils.DimenUtils;
 import com.termux.x11.view.PopupSlideSmall;
 import com.xiaokun.dialogtiplib.dialog_tip.TipLoadDialog;
 import com.xwdz.http.QuietOkHttp;
 import com.xwdz.http.callback.JsonCallBack;
-
-import org.greenrobot.eventbus.EventBus;
-import org.greenrobot.eventbus.Subscribe;
-import org.greenrobot.eventbus.ThreadMode;
-
-import java.lang.ref.WeakReference;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 
 import okhttp3.Call;
 import razerdp.basepopup.BasePopupWindow;
@@ -88,11 +108,11 @@ public class AppListActivity extends AppCompatActivity {
     private int screenHeight;
     private int spanCount;
     private boolean mAppListInit = false;
-    private boolean mWindowManagerInit = false;
     public TipLoadDialog tipLoadDialog;
-    private WindowManager windowManager;
-    private WMServiceConnection connection;
+    private ServiceConnection connection;
     private boolean isLoading;
+
+    public IBinder service;
 
     public interface ItemClickListener {
         void onItemClick(View itemView, int position, AppListResult.DataBeanX.DataBean app, boolean isRight, MotionEvent event);
@@ -102,76 +122,85 @@ public class AppListActivity extends AppCompatActivity {
     protected void onCreate(@Nullable Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.applist_activity);
+        com.xiaokun.dialogtiplib.util.AppUtils.init(this);
         loadingView = (ProgressBar) findViewById(R.id.loadingView);
-        EventBus.getDefault().register(this);
+        tipLoadDialog = new TipLoadDialog(this);
         initAppList();
+//        WindowMetrics maximumWindowMetrics = getWindow().getWindowManager().getMaximumWindowMetrics();
+//        Rect bounds = null;
+//        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+//            bounds = maximumWindowMetrics.getBounds();
+//        }
+//        Log.d(TAG, "onCreate: bounds:" + bounds + "");
+//        AppUtils.GLOBAL_SCREEN_WIDTH = bounds.right;
+//        AppUtils.GLOBAL_SCREEN_HEIGHT = bounds.bottom;
         Util.copyAssetsToFilesIfNedd(this, "xkb", "xkb");
-        registerReceiver(receiver, new IntentFilter(ACTION_START));
-        getWindow().getDecorView().postDelayed(new Runnable() {
-            @Override
-            public void run() {
-                startXserver();
-                Log.d(TAG, "run() called");
-            }
-        }, 50);
-
-        getWindow().getDecorView().postDelayed(new Runnable() {
-            @Override
-            public void run() {
-                ActivityOptions options = ActivityOptions.makeBasic();
-                options.setLaunchBounds(new Rect(0,0,1,1));
-                Intent intent = new Intent(AppListActivity.this, MainActivity.class);
-                intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                startActivity(intent, options.toBundle());
-            }
-        }, 5000);
+        startXWindowService();
+        registerReceiver(receiver, new IntentFilter(ACTION_START) {{
+            addAction(ACTION_PREFERENCES_CHANGED);
+            addAction(ACTION_STOP);
+            addAction(DESTROY_ACTIVITY_FROM_X);
+            addAction(START_ACTIVITY_FROM_X);
+            addAction(STOP_WINDOW_FROM_X);
+            addAction(MODALED_ACTION_ACTIVITY_FROM_X);
+            addAction(UNMODALED_ACTION_ACTIVITY_FROM_X);
+            addAction(ACTION_UPDATE_ICON);
+        }},  0);
     }
-
-    private void startXserver() {
-        CmdEntryPoint.main(new String[]{":1", "-legacy-drawing", "-listen", "tcp"});
-    }
-
-    private void bindWindowManager() {
-        Log.d(TAG, "bindWindowManager() called");
-        if(connection == null ){
-            connection = new WMServiceConnection();
-        }
-        Intent intent = new Intent(this, WMService.class);
-        bindService(intent, connection, BIND_AUTO_CREATE);
-        windowManager = new WindowManager( new WeakReference<>(this));
-        windowManager.startWindowManager();
-    }
-
 
     private final BroadcastReceiver receiver = new BroadcastReceiver() {
+        @SuppressLint("UnspecifiedRegisterReceiverFlag")
         @Override
         public void onReceive(Context context, Intent intent) {
-            if (ACTION_START.equals(intent.getAction()) && !WindowManager.isConnected()) {
-                bindWindowManager();
-            } else if (MainActivity.ACTION_STOP.equals(intent.getAction())) {
-
+            if (ACTION_START.equals(intent.getAction())) {
+            } else if (ACTION_STOP.equals(intent.getAction())) {
             } else if (ACTION_PREFERENCES_CHANGED.equals(intent.getAction())) {
-
+            } else if (DESTROY_ACTIVITY_FROM_X.equals(intent.getAction())){
+                WindowAttribute attr = intent.getParcelableExtra(ACTION_X_WINDOW_ATTRIBUTE);
+            } else if (START_ACTIVITY_FROM_X.equals(intent.getAction())){
+                WindowAttribute attr = intent.getParcelableExtra(ACTION_X_WINDOW_ATTRIBUTE);
+            } else if(STOP_WINDOW_FROM_X.equals(intent.getAction())){
+                WindowAttribute attr = intent.getParcelableExtra(ACTION_X_WINDOW_ATTRIBUTE);
+                App.getApp().stopingActivityWindow.add(attr.getXID());
+            } else if(MODALED_ACTION_ACTIVITY_FROM_X.equals(intent.getAction())){
+                WindowAttribute attr = intent.getParcelableExtra(ACTION_X_WINDOW_ATTRIBUTE);
+                Property property = intent.getParcelableExtra(ACTION_X_WINDOW_PROPERTY);
+            } else if(UNMODALED_ACTION_ACTIVITY_FROM_X.equals(intent.getAction())){
+                WindowAttribute attr = intent.getParcelableExtra(ACTION_X_WINDOW_ATTRIBUTE);
+            } else if(ACTION_UPDATE_ICON.equals(intent.getAction())){
+                long windowId = intent.getLongExtra("window_id", 0);
             }
         }
     };
 
 
-    @Subscribe(threadMode = ThreadMode.MAIN,priority = 1)
-    public void onReceiveMsg(EventMessage message){
-        Log.e("EventBus_Subscriber", "onReceiveMsg_MAIN: " + message.toString());
-        if(windowManager == null){
-            return;
-        }
-        switch (message.getType()){
-            case X_START_ACTIVITY_MAIN_WINDOW:
-                windowManager.startActivityForXMainWindow(message.getWindowAttribute(), MainActivity1.class);
-                break;
-            default:
-                break;
-        }
-    }
+    private void startXWindowService() {
+        if(connection == null){
+            connection = new ServiceConnection() {
+                @Override
+                public void onServiceConnected(ComponentName name, IBinder service) {
+                    AppListActivity.this.service = service;
+                    try {
+                        Objects.requireNonNull(AppListActivity.this.service).linkToDeath(() -> {
+                            AppListActivity.this.service = null;
+                            Log.v(TAG, "Disconnected");
+//                            showXserverDisconnect(AppListActivity.this);
+                        }, 0);
+                    } catch (RemoteException e) {
+                        e.printStackTrace();
+                    }
+                    showXserverStartSuccess(AppListActivity.this);
+                }
 
+                @Override
+                public void onServiceDisconnected(ComponentName name) {
+                    AppListActivity.this.service = null;
+//                    showXserverDisconnect(AppListActivity.this);
+                }
+            };
+        }
+        bindService(new Intent(this, XWindowService.class), connection, BIND_AUTO_CREATE);
+    }
 
     @Override
     protected void onDestroy() {
@@ -179,14 +208,12 @@ public class AppListActivity extends AppCompatActivity {
         if( connection != null ){
             unbindService(connection);
         }
-        if( windowManager != null ){
-            windowManager.stopWindowManager();
-        }
         if(tipLoadDialog != null){
             tipLoadDialog = null;
         }
-        EventBus.getDefault().unregister(this);
+        unregisterReceiver(receiver);
     }
+
 
     @Override
     protected void onResume() {
@@ -199,16 +226,21 @@ public class AppListActivity extends AppCompatActivity {
                 }
             }, 3000);
         }
+        mayGetApps();
+    }
+
+    private void mayGetApps() {
         if(screenHeight == 0 | screenWidth == 0){
             screenWidth = DimenUtils.getScreenWidth();
             screenHeight = DimenUtils.getScreenHeight();
         } else if( screenHeight != DimenUtils.getScreenHeight()){
             screenWidth = DimenUtils.getScreenWidth();
             screenHeight = DimenUtils.getScreenHeight();
-            spanCount = DimenUtils.getScreenWidth() / (int) DimenUtils.dpToPx(160.0f);
-            int count = Math.max(spanCount, 3);
+            int count = Math.max(DimenUtils.getScreenWidth() / (int) DimenUtils.dpToPx(160.0f), 3);
+            Log.d(TAG, "mayGetApps count:" + count + " spanCount:" + spanCount);
             if(spanCount != count){
                 initAppList();
+                spanCount = count;
             }
         }
     }
@@ -227,15 +259,14 @@ public class AppListActivity extends AppCompatActivity {
         }
         spanCount = Math.max(spanCount, 3);
         mRefreshLayout = findViewById(R.id.refresh_layout);
-        mRefreshLayout.setOnRefreshListener(mRefreshListener); // 刷新监听。
+        mRefreshLayout.setOnRefreshListener(mRefreshListener); //
         mRecyclerView = findViewById(R.id.recycler_view);
         mRecyclerView.setLayoutManager(new GridLayoutManager(this, spanCount));
-        mRecyclerView.useDefaultLoadMore(); // 使用默认的加载更多的View。
-        mRecyclerView.setLoadMoreListener(mLoadMoreListener); // 加载更多的监听。
+        mRecyclerView.useDefaultLoadMore(); //
+        mRecyclerView.setLoadMoreListener(mLoadMoreListener); //
         mRecyclerView.setAutoLoadMore(true);
         mAdapter = new AppAdapter(this, mDataList, mItemClickListener);
         mRecyclerView.setAdapter(mAdapter);
-        // 请求服务器加载数据。
         getAllLinuxApp(true, 1);
         mRefreshLayout.getViewTreeObserver().addOnGlobalLayoutListener(new ViewTreeObserver.OnGlobalLayoutListener() {
             @Override
@@ -249,8 +280,9 @@ public class AppListActivity extends AppCompatActivity {
     @Override
     public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
-        if(hasFocus && !isLoading ){
-            initAppList();
+        AppUtils.set("fde.click_as_touch", "false");
+        if(hasFocus){
+            mayGetApps();
         }
     }
 
@@ -274,19 +306,19 @@ public class AppListActivity extends AppCompatActivity {
     ItemClickListener mItemClickListener = new ItemClickListener() {
         @Override
         public void onItemClick(View itemView, int position, AppListResult.DataBeanX.DataBean app, boolean isRight, MotionEvent event) {
-//            loadingView.setVisibility(View.VISIBLE);
-//            long nowTime = System.currentTimeMillis();
-//            if (nowTime - mLastClickTime < TIME_INTERVAL) {
-//                // do something
-//                Log.d(TAG, "onItemClick() click too quickly");
-//                return;
-//            }
-//            mLastClickTime = nowTime;
-//            Log.d(TAG, "onItemClick() called with: itemView = [" + itemView + "], position = [" + position + "], app = [" + app + "], isRight = [" + isRight + "]");
+            long nowTime = System.currentTimeMillis();
+            if (nowTime - mLastClickTime < TIME_INTERVAL) {
+                // do something
+                Log.d(TAG, "onItemClick() click too quickly");
+                mLastClickTime = nowTime;
+                return;
+            }
+            mLastClickTime = nowTime;
+            Log.d(TAG, "onItemClick() called with: itemView = [" + itemView + "], position = [" + position + "], app = [" + app + "], isRight = [" + isRight + "]");
 //            if (isRight) {
 //                showOptionView(itemView, app, event);
 //            } else {
-//                load2Start(app);
+            load2Start(app);
 //            }
         }
     };
@@ -446,8 +478,11 @@ public class AppListActivity extends AppCompatActivity {
 
                     @Override
                     public void onSuccess(Call call, AppListResult response) {
+                        if(tipLoadDialog != null){
+                            tipLoadDialog.dismiss();
+                        }
                         isLoading = false;
-                        Log.d(TAG, "onSuccess() called with: call = [" + call + "], response = [" + response + "]");
+//                        Log.d(TAG, "onSuccess() called with: call = [" + call + "], response = [" + response + "]");
                         List<AppListResult.DataBeanX.DataBean> data = response.getData().getData();
                         if (fromShortcut) {
                             gotoShortcutApp(data);
@@ -463,11 +498,11 @@ public class AppListActivity extends AppCompatActivity {
                         }
                         mRecyclerView.loadMoreFinish(mDataList.size() == 0, response.getData().getPage().getTotal() > mDataList.size());
                         mRefreshLayout.setRefreshing(false);
-
-                        if(forceRefresh){
-                            mRecyclerView.scrollToPosition(0);
-                        }
-                        mAppListInit = mDataList.size() != 0;
+//
+//                        if(forceRefresh){
+//                            mRecyclerView.scrollToPosition(0);
+//                        }
+//                        mAppListInit = mDataList.size() != 0;
                     }
                 });
     }
@@ -507,22 +542,27 @@ public class AppListActivity extends AppCompatActivity {
     }
 
     private void load2Start(AppListResult.DataBeanX.DataBean app) {
-        tipLoadDialog.setBackground(R.drawable.custom_dialog_bg_corner)
-                .setNoShadowTheme()
-                .setMsgAndType(getString(R.string.lunching_tip) + app.getName(), TipLoadDialog.ICON_TYPE_LOADING)
-                .setTipTime(5000)
-                .show();
-        tryStartVncApp(app);
+        if (service == null || !service.isBinderAlive()) {
+            showXserverReconnect(this);
+            startXWindowService();
+        } else {
+            tipLoadDialog.setBackground(R.drawable.custom_dialog_bg_corner)
+                    .setNoShadowTheme()
+                    .setMsgAndType(getString(R.string.lunching_tip) + app.getName(), TipLoadDialog.ICON_TYPE_LOADING)
+                    .setTipTime(5000)
+                    .show();
+            tryStartVncApp(app);
+        }
     }
 
 
     private void tryStartVncApp(AppListResult.DataBeanX.DataBean app) {
         // todo mock
-        QuietOkHttp.post(BASEURL + URL_STOPAPP)
+        QuietOkHttp.post(BASEURL + URL_STARTAPP_X)
                 .setCallbackToMainUIThread(true)
                 .addParams("App", app.Name)
                 .addParams("Path", app.Path)
-                .addParams("SysOnly", "false")
+                .addParams("Display", DISPLAY_GLOBAL_PARAM)
                 .execute(new JsonCallBack<VncResult.GetPortResult>() {
                     @Override
                     public void onFailure(Call call, Exception e) {
@@ -532,8 +572,9 @@ public class AppListActivity extends AppCompatActivity {
 
                     @Override
                     public void onSuccess(Call call, VncResult.GetPortResult response) {
+                        tipLoadDialog.dismiss();
                         Log.i(TAG, "onSuccess() called with: call = [" + call + "], response = [" + response + "]");
-                        tryLunchApp(app);
+//                        tryLunchApp(app);
                     }
                 });
     }
